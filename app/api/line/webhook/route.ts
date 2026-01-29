@@ -169,6 +169,19 @@ export async function POST(request: NextRequest) {
                         is_replied: false
                     });
                     console.log('已記錄訊息:', groupName, text);
+
+                    // 轉發到主管群
+                    const { data: managerGroup } = await supabase
+                        .from('agent_groups')
+                        .select('line_group_id')
+                        .eq('group_type', 'manager')
+                        .single();
+
+                    if (managerGroup) {
+                        const notifyText = `📩 【${groupName}】有新訊息：\n\n${text}`;
+                        await pushMessage(managerGroup.line_group_id, notifyText);
+                    }
+
                     continue;
                 }
 
