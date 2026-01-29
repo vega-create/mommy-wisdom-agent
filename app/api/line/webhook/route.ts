@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { parseMessage, addTask, completeTask, getEmployeeTasks } from '@/lib/ai-parser';
+import { parseMessage, addTask, completeTask, getEmployeeTasks, sendMessageToGroup } from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
 
@@ -204,6 +204,15 @@ export async function POST(request: NextRequest) {
                 if (groupType === 'manager') {
                     const parsed = await parseMessage(text, groupType);
                     console.log('AI 解析結果:', parsed);
+
+                    // 發送訊息到其他群組
+                    if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
+                        const result = await sendMessageToGroup(parsed.target_group, parsed.message_content);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
 
                     if (parsed.intent === 'add_task' && parsed.employee_name) {
                         const result = await addTask(

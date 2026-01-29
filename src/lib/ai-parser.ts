@@ -2,12 +2,14 @@ import { openai } from './openai';
 import { supabase } from './supabase';
 
 interface ParseResult {
-    intent: 'add_task' | 'complete_task' | 'query_tasks' | 'query_progress' | 'unknown';
+    intent: 'add_task' | 'complete_task' | 'query_tasks' | 'query_progress' | 'send_message' | 'unknown';
     employee_name?: string;
     task_name?: string;
     client_name?: string;
     frequency?: string;
     frequency_detail?: string;
+    target_group?: string;
+    message_content?: string;
     message?: string;
 }
 
@@ -19,12 +21,14 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
 
 請回傳 JSON 格式：
 {
-  "intent": "add_task" | "complete_task" | "query_tasks" | "query_progress" | "unknown",
+  "intent": "add_task" | "complete_task" | "query_tasks" | "query_progress" | "send_message" | "unknown",
   "employee_name": "員工名稱（如有）",
   "task_name": "任務名稱（如有）",
   "client_name": "客戶名稱（如有）",
   "frequency": "daily | weekly | monthly | custom（如有）",
-  "frequency_detail": "週二,週三 或 每月15號（如有）"
+  "frequency_detail": "週二,週三 或 每月15號（如有）",
+  "target_group": "目標群組名稱（如有，例如：雅涵群、寵樂芙）",
+  "message_content": "要發送的訊息內容（如有）"
 }
 
 判斷規則（非常嚴格）：
@@ -46,24 +50,15 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
 4. query_progress：詢問成效
    ✓「這個月的成效」「進度報表」
 
-5. unknown：以下都是 unknown
+5. send_message：要發送訊息到其他群組
+   ✓「到雅涵群說大家辛苦了」→ target_group: "雅涵群", message_content: "大家辛苦了"
+   ✓「跟寵樂芙說報告已完成」→ target_group: "寵樂芙", message_content: "報告已完成"
+   ✓「發訊息到怡婷群：今天表現很好」→ target_group: "怡婷群", message_content: "今天表現很好"
+
+6. unknown：以下都是 unknown
    - 說明狀況：「我這周暫時無法...」「我還在弄...」
    - 討論中：「看怎麼樣比較順暢」「我在想...」
-   - 說明進度：「我已經做好四週的內容了」（沒有明確說完成哪個任務）
-   - 說明計畫：「我會把...都發」「等一下會...」
    - 一般聊天：「好喔」「謝謝」「了解」
-   - 解釋說明：任何解釋性的長句子
-
-範例：
-- 「寵樂芙廣告完成了」→ complete_task ✓
-- 「媽咪小編輪播好了～」→ complete_task ✓
-- 「佳音圖第一週完成 已排程」→ complete_task ✓
-- 「我這周社群暫時無法按照安排的時間發」→ unknown ✓
-- 「我還在弄看怎麼樣比較順暢」→ unknown ✓
-- 「媽咪小編我已經做好四週的內容了」→ unknown ✓（說明進度，不是回報完成）
-- 「不過我會把兩個每週三篇該發的都發」→ unknown ✓
-- 「好喔」→ unknown ✓
-- 「早安」→ unknown ✓
 
 只回傳 JSON，不要其他文字。`;
 
@@ -80,6 +75,39 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
     } catch (error) {
         console.error('AI parse error:', error);
         return { intent: 'unknown' };
+    }
+}
+
+// 發送訊息到指定群組
+export async function sendMessageToGroup(targetGroupName: string, messageContent: string) {
+    // 查找群組
+    const { data: group } = await supabase
+        .from('agent_groups')
+        .select('group_id, group_name')
+        .ilike('group_name', `%${targetGroupName}%`)
+        .single();
+
+    if (!group) {
+        return { success: false, message: `找不到群組「${targetGroupName}」` };
+    }
+
+    // 發送訊息
+    const res = await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        },
+        body: JSON.stringify({
+            to: group.group_id,
+            messages: [{ type: 'text', text: messageContent }],
+        }),
+    });
+
+    if (res.ok) {
+        return { success: true, message: `✅ 已發送到「${group.group_name}」` };
+    } else {
+        return { success: false, message: '發送失敗，請稍後再試' };
     }
 }
 
@@ -208,7 +236,7 @@ export async function getEmployeeTasks(employeeId: string) {
     return message;
 }
 
-// 解析客戶訊息（保留，之後 Web 儀表板用）
+// 解析客戶訊息（給 Web 儀表板用）
 export async function parseCustomerMessage(text: string): Promise<{
     type: 'urgent' | 'question' | 'payment' | 'general';
     reply: string;

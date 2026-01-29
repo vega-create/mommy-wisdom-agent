@@ -3,69 +3,75 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-const LINE_API_URL = 'https://api.line.me/v2/bot/message/push';
-
-async function pushMessage(groupId: string, text: string) {
-    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-    await fetch(LINE_API_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-            to: groupId,
-            messages: [{ type: 'text', text }]
-        }),
-    });
-}
-
-export async function GET() {
+export async function POST() {
     try {
-        const { data: groups } = await supabase
-            .from('agent_groups')
-            .select('line_group_id, employee_id, group_name')
-            .eq('group_type', 'employee')
+        const now = new Date();
+        const dayOfWeek = now.getDay();
+        const todayName = ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek];
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const todayStr = now.toISOString().split('T')[0];
+
+        const { data: employees } = await supabase
+            .from('agent_employees')
+            .select('id, name, line_group_id')
             .eq('is_active', true);
 
-        if (!groups) return NextResponse.json({ success: true });
+        if (!employees) return NextResponse.json({ success: true });
 
-        const today = new Date().toISOString().split('T')[0];
+        for (const emp of employees) {
+            // 週末只提醒 Vega
+            if (isWeekend && emp.name !== 'Vega') continue;
+            if (!emp.line_group_id) continue;
 
-        for (const group of groups) {
-            if (!group.line_group_id || !group.employee_id) continue;
-
-            // 取得員工的任務
+            // 取得該員工的任務
             const { data: tasks } = await supabase
                 .from('agent_tasks')
-                .select('id, task_name, client_name')
-                .eq('employee_id', group.employee_id)
+                .select('id, task_name, client_name, frequency_detail')
+                .eq('employee_id', emp.id)
                 .eq('is_active', true);
 
             if (!tasks || tasks.length === 0) continue;
 
-            // 取得今日已完成的任務
-            const { data: completed } = await supabase
+            // 篩選今天要做的任務
+            const todayTasks = tasks.filter(task => {
+                const detail = task.frequency_detail || '';
+                if (detail === '每天') return true;
+                if (detail === '不固定') return false;
+                if (detail.includes(todayName)) return true;
+                if (detail.includes('週' + todayName)) return true;
+                return false;
+            });
+
+            // 查今天已完成的
+            const { data: completedToday } = await supabase
                 .from('agent_task_records')
                 .select('task_id')
-                .eq('employee_id', group.employee_id)
-                .gte('completed_at', today);
+                .eq('employee_id', emp.id)
+                .gte('completed_at', todayStr);
 
-            const completedIds = (completed || []).map(c => c.task_id);
-            const unfinished = tasks.filter(t => !completedIds.includes(t.id));
+            const completedIds = (completedToday || []).map(r => r.task_id);
 
-            if (unfinished.length === 0) {
-                await pushMessage(group.line_group_id, '🎉 太棒了！今日任務全部完成！');
-            } else {
-                let message = '⏰ 下班前提醒，還有未完成：\n';
-                unfinished.forEach((task, i) => {
-                    message += `${i + 1}. ${task.client_name} - ${task.task_name}\n`;
-                });
-                message += `\n共 ${unfinished.length} 項待完成`;
+            // 今天還沒完成的
+            const unfinishedTasks = todayTasks.filter(t => !completedIds.includes(t.id));
 
-                await pushMessage(group.line_group_id, message);
-            }
+            if (unfinishedTasks.length === 0) continue;
+
+            let message = `⏰ ${emp.name}，今天還有任務未完成：\n\n`;
+            unfinishedTasks.forEach(t => {
+                message += `• ${t.client_name ? t.client_name + ' - ' : ''}${t.task_name}\n`;
+            });
+
+            await fetch('https://api.line.me/v2/bot/message/push', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+                },
+                body: JSON.stringify({
+                    to: emp.line_group_id,
+                    messages: [{ type: 'text', text: message.trim() }],
+                }),
+            });
         }
 
         return NextResponse.json({ success: true });
@@ -73,4 +79,8 @@ export async function GET() {
         console.error('Evening reminder error:', error);
         return NextResponse.json({ error: 'Failed' }, { status: 500 });
     }
+}
+
+export async function GET() {
+    return POST();
 }
