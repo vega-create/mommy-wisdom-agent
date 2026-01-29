@@ -17,6 +17,7 @@ import {
 } from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
+const BOSS_USER_ID = 'U9f60f88dca07d665c4ab000bc2d3f5f3';
 
 async function replyMessage(replyToken: string, text: string) {
     const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -170,39 +171,70 @@ export async function POST(request: NextRequest) {
 
                 // 客戶、合作夥伴、會計群組
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
-                    // 記錄訊息（包括老闆的）
-                    await supabase.from('agent_customer_messages').insert({
-                        group_id: groupId,
-                        group_name: groupName,
-                        group_type: groupType,
-                        user_id: userId,
-                        message: text,
-                        is_replied: false
-                    });
+                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-                    // 老闆自己的訊息不通知
-                    if (userId === 'U9f60f88dca07d665c4ab000bc2d3f5f3') {
-                        console.log('老闆訊息，已記錄但不通知');
+                    // 老闆自己的訊息：記錄但不通知
+                    if (userId === BOSS_USER_ID) {
+                        await supabase.from('agent_customer_messages').insert({
+                            group_id: groupId,
+                            group_name: groupName,
+                            group_type: groupType,
+                            user_id: userId,
+                            message: text,
+                            is_replied: false
+                        });
                         continue;
                     }
 
                     const parsed = await parseCustomerMessage(text);
 
+                    // 只有重要訊息才記錄和考慮通知
                     if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
-                        const { data: managerGroup } = await supabase
-                            .from('agent_groups')
-                            .select('line_group_id')
-                            .eq('group_type', 'manager')
-                            .single();
+                        // 記錄重要訊息
+                        await supabase.from('agent_customer_messages').insert({
+                            group_id: groupId,
+                            group_name: groupName,
+                            group_type: groupType,
+                            user_id: userId,
+                            message: text,
+                            is_replied: false
+                        });
 
-                        if (managerGroup) {
-                            let typeLabel = '📩';
-                            if (parsed.type === 'urgent') typeLabel = '🚨 緊急';
-                            if (parsed.type === 'question') typeLabel = '❓ 問題';
-                            if (parsed.type === 'payment') typeLabel = '💰 付款';
+                        // 檢查 30 分鐘內老闆是否有回覆（代表已處理）
+                        const { data: bossReplied } = await supabase
+                            .from('agent_customer_messages')
+                            .select('id')
+                            .eq('group_id', groupId)
+                            .eq('user_id', BOSS_USER_ID)
+                            .gte('created_at', thirtyMinutesAgo)
+                            .limit(1);
 
-                            const notifyText = `${typeLabel}【${groupName}】：\n\n${text}`;
-                            await pushMessage(managerGroup.line_group_id, notifyText);
+                        if (bossReplied && bossReplied.length > 0) {
+                            // 老闆已處理，不通知
+                            continue;
+                        }
+
+                        // 檢查 30 分鐘內是否已有其他重要訊息（已通知過）
+                        const { data: recentImportant } = await supabase
+                            .from('agent_customer_messages')
+                            .select('id')
+                            .eq('group_id', groupId)
+                            .neq('user_id', BOSS_USER_ID)
+                            .gte('created_at', thirtyMinutesAgo)
+                            .limit(2);
+
+                        // 30 分鐘內第一則重要訊息才通知
+                        if (!recentImportant || recentImportant.length <= 1) {
+                            const { data: managerGroup } = await supabase
+                                .from('agent_groups')
+                                .select('line_group_id')
+                                .eq('group_type', 'manager')
+                                .single();
+
+                            if (managerGroup) {
+                                const notifyText = `📩 ${groupName} 有新訊息`;
+                                await pushMessage(managerGroup.line_group_id, notifyText);
+                            }
                         }
                     }
                     continue;
@@ -215,16 +247,6 @@ export async function POST(request: NextRequest) {
 
                 // 員工群組
                 if (groupType === 'employee') {
-                    // 記錄員工訊息（不通知）
-                    await supabase.from('agent_customer_messages').insert({
-                        group_id: groupId,
-                        group_name: groupName,
-                        group_type: groupType,
-                        user_id: userId,
-                        message: text,
-                        is_replied: false
-                    });
-
                     const parsed = await parseMessage(text, groupType);
 
                     if (parsed.intent === 'complete_task') {
