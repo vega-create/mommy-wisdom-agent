@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { parseMessage, addTask, completeTask, getEmployeeTasks } from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
 
@@ -51,7 +52,7 @@ export async function POST(request: NextRequest) {
                         console.log('新群組已記錄:', groupId);
                     }
 
-                    // 同時寫入會計系統的表（讓會計系統也能用）
+                    // 同時寫入會計系統的表
                     const { data: existingAcct } = await supabase
                         .from('acct_line_groups')
                         .select('id')
@@ -105,9 +106,75 @@ export async function POST(request: NextRequest) {
                     continue;
                 }
 
-                // TODO: AI 語意判斷（之後加）
-                // 暫時回覆收到
-                console.log('收到訊息:', text);
+                // 取得群組類型
+                let groupType = 'unknown';
+                if (groupId) {
+                    const { data: group } = await supabase
+                        .from('agent_groups')
+                        .select('group_type')
+                        .eq('line_group_id', groupId)
+                        .single();
+                    groupType = group?.group_type || 'employee';
+                }
+
+                // AI 解析訊息
+                const parsed = await parseMessage(text, groupType);
+                console.log('AI 解析結果:', parsed);
+
+                // 根據意圖處理
+                if (parsed.intent === 'add_task' && parsed.employee_name) {
+                    const result = await addTask(
+                        parsed.employee_name,
+                        parsed.task_name || '未命名任務',
+                        parsed.client_name || '',
+                        parsed.frequency || 'weekly',
+                        parsed.frequency_detail || ''
+                    );
+                    if (replyToken) {
+                        await replyMessage(replyToken, result.message);
+                    }
+                    continue;
+                }
+
+                if (parsed.intent === 'complete_task') {
+                    // 找出這個群組對應的員工
+                    const { data: group } = await supabase
+                        .from('agent_groups')
+                        .select('employee_id')
+                        .eq('line_group_id', groupId)
+                        .single();
+
+                    if (group?.employee_id) {
+                        const result = await completeTask(
+                            group.employee_id,
+                            parsed.task_name || '',
+                            parsed.client_name
+                        );
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                    }
+                    continue;
+                }
+
+                if (parsed.intent === 'query_tasks' && parsed.employee_name) {
+                    const { data: employee } = await supabase
+                        .from('agent_employees')
+                        .select('id')
+                        .eq('name', parsed.employee_name)
+                        .single();
+
+                    if (employee) {
+                        const tasks = await getEmployeeTasks(employee.id);
+                        if (replyToken) {
+                            await replyMessage(replyToken, tasks);
+                        }
+                    }
+                    continue;
+                }
+
+                // 其他訊息暫不回覆
+                console.log('未處理訊息:', text);
             }
         }
 
