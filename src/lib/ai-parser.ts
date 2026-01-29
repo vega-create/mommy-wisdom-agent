@@ -531,9 +531,9 @@ export async function getEmployeeTasks(employeeId: string) {
 // 解析客戶訊息
 export async function parseCustomerMessage(text: string): Promise<{
     type: 'urgent' | 'question' | 'payment' | 'general';
-    reply: string;
+    summary: string;
 }> {
-    const prompt = `你是客服助理。分析客戶訊息，判斷類型。
+    const prompt = `你是客服助理。分析客戶訊息，判斷類型並生成簡短摘要。
 
 客戶訊息：「${text}」
 
@@ -556,15 +556,19 @@ export async function parseCustomerMessage(text: string): Promise<{
 - general（預設，大部分訊息都是這個）：
   ✓ 一般對話、討論、閒聊
   ✓ 「好的」「OK」「謝謝」「了解」
-  ✓ 提醒、建議、說明（如：開發票的事、注意一下）
+  ✓ 提醒、建議、說明
   ✓ 任何不確定的訊息
 
 重要：如果不確定，請選 general。寧可漏報也不要誤報。
 
+摘要規則：
+- 用 10 字以內描述重點
+- 例如：「課程登入問題」「詢問報價」「已付款通知」「抱怨出貨延遲」
+
 請回傳 JSON：
 {
   "type": "urgent | question | payment | general",
-  "reply": ""
+  "summary": "簡短摘要（10字內）"
 }
 
 只回傳 JSON，不要其他文字。`;
@@ -581,6 +585,6 @@ export async function parseCustomerMessage(text: string): Promise<{
         return JSON.parse(cleaned);
     } catch (error) {
         console.error('Customer parse error:', error);
-        return { type: 'general', reply: '' };
+        return { type: 'general', summary: '' };
     }
 }
