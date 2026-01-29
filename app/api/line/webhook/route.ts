@@ -170,6 +170,7 @@ export async function POST(request: NextRequest) {
 
                 // 客戶、合作夥伴、會計群組
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
+                    // 記錄訊息（包括老闆的）
                     await supabase.from('agent_customer_messages').insert({
                         group_id: groupId,
                         group_name: groupName,
@@ -178,6 +179,12 @@ export async function POST(request: NextRequest) {
                         message: text,
                         is_replied: false
                     });
+
+                    // 老闆自己的訊息不通知
+                    if (userId === 'U9f60f88dca07d665c4ab000bc2d3f5f3') {
+                        console.log('老闆訊息，已記錄但不通知');
+                        continue;
+                    }
 
                     const parsed = await parseCustomerMessage(text);
 
@@ -208,6 +215,16 @@ export async function POST(request: NextRequest) {
 
                 // 員工群組
                 if (groupType === 'employee') {
+                    // 記錄員工訊息（不通知）
+                    await supabase.from('agent_customer_messages').insert({
+                        group_id: groupId,
+                        group_name: groupName,
+                        group_type: groupType,
+                        user_id: userId,
+                        message: text,
+                        is_replied: false
+                    });
+
                     const parsed = await parseMessage(text, groupType);
 
                     if (parsed.intent === 'complete_task') {
