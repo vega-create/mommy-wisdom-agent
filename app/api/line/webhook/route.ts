@@ -147,8 +147,7 @@ export async function POST(request: NextRequest) {
                     if (group?.employee_id) {
                         const result = await completeTask(
                             group.employee_id,
-                            parsed.task_name || '',
-                            parsed.client_name
+                            text  // 傳入原始訊息，讓 AI 比對
                         );
                         if (replyToken) {
                             await replyMessage(replyToken, result.message);
