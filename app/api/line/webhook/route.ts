@@ -180,7 +180,7 @@ export async function POST(request: NextRequest) {
                             group_name: groupName,
                             group_type: groupType,
                             user_id: userId,
-                            message: text,
+                            message: parsed.summary,
                             is_replied: false
                         });
                         continue;
