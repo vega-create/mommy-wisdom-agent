@@ -173,30 +173,23 @@ export async function POST(request: NextRequest) {
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
                     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-                    // 老闆自己的訊息：記錄但不通知
+                    // 老闆自己的訊息：不處理
                     if (userId === BOSS_USER_ID) {
+                        continue;
+                    }
+
+                    // 先解析訊息
+                    const parsed = await parseCustomerMessage(text);
+
+                    // 只有重要訊息才記錄和考慮通知
+                    if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
+                        // 記錄重要訊息（摘要）
                         await supabase.from('agent_customer_messages').insert({
                             group_id: groupId,
                             group_name: groupName,
                             group_type: groupType,
                             user_id: userId,
                             message: parsed.summary,
-                            is_replied: false
-                        });
-                        continue;
-                    }
-
-                    const parsed = await parseCustomerMessage(text);
-
-                    // 只有重要訊息才記錄和考慮通知
-                    if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
-                        // 記錄重要訊息
-                        await supabase.from('agent_customer_messages').insert({
-                            group_id: groupId,
-                            group_name: groupName,
-                            group_type: groupType,
-                            user_id: userId,
-                            message: text,
                             is_replied: false
                         });
 
@@ -210,11 +203,10 @@ export async function POST(request: NextRequest) {
                             .limit(1);
 
                         if (bossReplied && bossReplied.length > 0) {
-                            // 老闆已處理，不通知
                             continue;
                         }
 
-                        // 檢查 30 分鐘內是否已有其他重要訊息（已通知過）
+                        // 檢查 30 分鐘內是否已有其他重要訊息
                         const { data: recentImportant } = await supabase
                             .from('agent_customer_messages')
                             .select('id')
