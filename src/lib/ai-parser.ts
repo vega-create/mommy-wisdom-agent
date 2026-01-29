@@ -537,11 +537,29 @@ export async function parseCustomerMessage(text: string): Promise<{
 
 客戶訊息：「${text}」
 
-類型判斷：
-- urgent：緊急、投訴、抱怨、不滿、退款、很急、馬上要、今天要
-- question：問題、疑問、怪怪的、怎麼做、為什麼、這樣對嗎、請問
-- payment：轉帳、匯款、付款、已付、已匯、給你錢
-- general：一般訊息、打招呼、謝謝、好的、OK、了解、討論中
+類型判斷（請嚴格判斷）：
+
+- urgent（非常嚴格，只有以下情況）：
+  ✓ 明確表達憤怒、投訴、要求退款
+  ✓ 使用「很急」「馬上」「立刻」「今天一定要」
+  ✓ 威脅性語句如「要告」「找律師」「消保官」
+  ✗ 一般討論、提醒、建議 → 不是 urgent
+
+- question（有明確疑問）：
+  ✓ 使用「請問」「為什麼」「怎麼」「是不是」「可以嗎」
+  ✓ 句尾有「？」問號
+  ✗ 陳述句 → 不是 question
+
+- payment（付款相關）：
+  ✓ 「已匯款」「已轉帳」「付款完成」「給你錢了」
+  
+- general（預設，大部分訊息都是這個）：
+  ✓ 一般對話、討論、閒聊
+  ✓ 「好的」「OK」「謝謝」「了解」
+  ✓ 提醒、建議、說明（如：開發票的事、注意一下）
+  ✓ 任何不確定的訊息
+
+重要：如果不確定，請選 general。寧可漏報也不要誤報。
 
 請回傳 JSON：
 {
@@ -555,7 +573,7 @@ export async function parseCustomerMessage(text: string): Promise<{
         const response = await openai.chat.completions.create({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
-            temperature: 0.3,
+            temperature: 0,
         });
 
         const content = response.choices[0]?.message?.content || '{}';
