@@ -37,7 +37,26 @@ async function pushMessage(groupId: string, text: string) {
         }),
     });
 }
+async function getGroupName(groupId: string): Promise<string> {
+    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
+    try {
+        const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/summary`, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+            },
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            return data.groupName || '未命名群組';
+        }
+    } catch (error) {
+        console.error('取得群組名稱失敗:', error);
+    }
+
+    return '未命名群組';
+}
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
@@ -48,10 +67,12 @@ export async function POST(request: NextRequest) {
             const groupId = event.source?.groupId;
             const userId = event.source?.userId;
             const replyToken = event.replyToken;
-
             // 機器人加入群組 → 記錄 group ID
             if (event.type === 'join') {
                 if (groupId) {
+                    // 取得群組名稱
+                    const groupName = await getGroupName(groupId);
+
                     const { data: existing } = await supabase
                         .from('agent_groups')
                         .select('id')
@@ -60,12 +81,12 @@ export async function POST(request: NextRequest) {
 
                     if (!existing) {
                         await supabase.from('agent_groups').insert({
-                            group_name: '新群組 (待命名)',
+                            group_name: groupName,
                             line_group_id: groupId,
-                            group_type: 'employee',
+                            group_type: 'customer',  // 預設為客戶
                             is_active: true
                         });
-                        console.log('新群組已記錄:', groupId);
+                        console.log('新群組已記錄:', groupName, groupId);
                     }
 
                     // 同時寫入會計系統的表
@@ -86,16 +107,16 @@ export async function POST(request: NextRequest) {
                             await supabase.from('acct_line_groups').insert({
                                 company_id: company.id,
                                 group_id: groupId,
-                                group_name: '群組 (自動偵測)',
+                                group_name: groupName,
                                 group_type: 'group',
                                 is_active: true,
-                                description: `AI Agent 自動偵測於 ${new Date().toLocaleString('zh-TW')}`
+                                description: `自動偵測於 ${new Date().toLocaleString('zh-TW')}`
                             });
                         }
                     }
 
                     if (replyToken) {
-                        await replyMessage(replyToken, '✅ 智慧媽咪 AI 助理已加入！');
+                        await replyMessage(replyToken, `✅ 智慧媽咪 AI 助理已加入「${groupName}」！`);
                     }
                 }
                 continue;
