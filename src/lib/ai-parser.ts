@@ -2,7 +2,7 @@ import { openai } from './openai';
 import { supabase } from './supabase';
 
 interface ParseResult {
-    intent: 'add_task' | 'complete_task' | 'query_tasks' | 'query_progress' | 'send_message' | 'unknown';
+    intent: 'add_task' | 'complete_task' | 'query_tasks' | 'query_progress' | 'send_message' | 'cancel_record' | 'delete_task' | 'update_task' | 'set_reminder' | 'schedule_meeting' | 'unknown';
     employee_name?: string;
     task_name?: string;
     client_name?: string;
@@ -10,6 +10,9 @@ interface ParseResult {
     frequency_detail?: string;
     target_group?: string;
     message_content?: string;
+    reminder_time?: string;
+    reminder_content?: string;
+    meeting_date?: string;
     message?: string;
 }
 
@@ -18,47 +21,67 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
 
 訊息：「${text}」
 群組類型：${groupType}
+今天是：${new Date().toLocaleDateString('zh-TW', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
 
 請回傳 JSON 格式：
 {
-  "intent": "add_task" | "complete_task" | "query_tasks" | "query_progress" | "send_message" | "unknown",
+  "intent": "add_task" | "complete_task" | "query_tasks" | "query_progress" | "send_message" | "cancel_record" | "delete_task" | "update_task" | "set_reminder" | "schedule_meeting" | "unknown",
   "employee_name": "員工名稱（如有）",
   "task_name": "任務名稱（如有）",
   "client_name": "客戶名稱（如有）",
   "frequency": "daily | weekly | monthly | custom（如有）",
   "frequency_detail": "週二,週三 或 每月15號（如有）",
-  "target_group": "目標群組名稱（如有，例如：雅涵群、寵樂芙）",
-  "message_content": "要發送的訊息內容（如有）"
+  "target_group": "目標群組名稱（如有）",
+  "message_content": "要發送的訊息內容（如有）",
+  "reminder_time": "提醒時間（如有，例如：15:00、下午3點、14:00）",
+  "reminder_content": "提醒內容（如有）",
+  "meeting_date": "會議日期（如有，例如：下週三、明天、2/5）"
 }
 
-判斷規則（非常嚴格）：
+判斷規則：
 
-1. add_task：必須有「新增」「加」「建立」等動詞 + 任務內容
+1. add_task：新增任務
    ✓「新增雅涵任務，每週三做寵樂芙廣告」
    ✓「幫怡婷加一個工作」
 
-2. complete_task：必須明確表達「已完成」的意思，包含：
-   - 「XXX完成了」「XXX完成」
-   - 「XXX做好了」「XXX弄好了」
-   - 「XXX OK了」「XXX ok」
-   - 「XXX 好了」
-   - 「XXX已排程」「XXX已發布」「XXX已上傳」
-   
+2. complete_task：完成任務
+   ✓「XXX完成了」「XXX做好了」「XXX OK了」
+
 3. query_tasks：詢問任務
    ✓「雅涵今天的任務」「今天要做什麼」
 
-4. query_progress：詢問成效
-   ✓「這個月的成效」「進度報表」
+4. send_message：發送訊息到其他群組
+   ✓「到雅涵群說大家辛苦了」
+   ✓「跟寵樂芙說報告已完成」
 
-5. send_message：要發送訊息到其他群組
-   ✓「到雅涵群說大家辛苦了」→ target_group: "雅涵群", message_content: "大家辛苦了"
-   ✓「跟寵樂芙說報告已完成」→ target_group: "寵樂芙", message_content: "報告已完成"
-   ✓「發訊息到怡婷群：今天表現很好」→ target_group: "怡婷群", message_content: "今天表現很好"
+5. cancel_record：取消/撤銷任務完成記錄
+   ✓「取消雅涵的工作回報」
+   ✓「撤銷剛才的完成記錄」
+   ✓「雅涵那個不算」
 
-6. unknown：以下都是 unknown
-   - 說明狀況：「我這周暫時無法...」「我還在弄...」
-   - 討論中：「看怎麼樣比較順暢」「我在想...」
-   - 一般聊天：「好喔」「謝謝」「了解」
+6. delete_task：刪除任務
+   ✓「刪除雅涵的FB貼文任務」
+   ✓「把怡婷的圖片製作任務移除」
+
+7. update_task：修改任務（時間、內容）
+   ✓「把雅涵的FB貼文改成週二週四」
+   ✓「修改怡婷的任務頻率為每天」
+
+8. set_reminder：設定個人提醒（提醒自己，發到主管群）
+   ✓「提醒我下午3點開會」
+   ✓「30分鐘後提醒我打電話」
+   ✓「15:00提醒開會」
+
+9. schedule_meeting：設定線上會議（發送到客戶/員工群）
+   ✓「給寵樂芙設定線上開會，時間是下週三2:00」
+   ✓「跟陸居下週四14:00線上會議」
+   ✓「安排明天3點跟橙川開會」
+   ✓「設定下週三14:00跟寵樂芙開會」
+   → target_group 填群組名稱
+   → meeting_date 填日期（下週三、明天、2/5）
+   → reminder_time 填時間（14:00、2:00、下午2點）
+
+10. unknown：一般聊天、不明確的訊息
 
 只回傳 JSON，不要其他文字。`;
 
@@ -80,7 +103,6 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
 
 // 發送訊息到指定群組
 export async function sendMessageToGroup(targetGroupName: string, messageContent: string) {
-    // 查找群組
     const { data: group } = await supabase
         .from('agent_groups')
         .select('line_group_id, group_name')
@@ -91,7 +113,6 @@ export async function sendMessageToGroup(targetGroupName: string, messageContent
         return { success: false, message: `找不到群組「${targetGroupName}」` };
     }
 
-    // 發送訊息
     const res = await fetch('https://api.line.me/v2/bot/message/push', {
         method: 'POST',
         headers: {
@@ -109,6 +130,280 @@ export async function sendMessageToGroup(targetGroupName: string, messageContent
     } else {
         return { success: false, message: '發送失敗，請稍後再試' };
     }
+}
+
+// 取消最近的任務完成記錄
+export async function cancelLastRecord(employeeName: string) {
+    const { data: employee } = await supabase
+        .from('agent_employees')
+        .select('id')
+        .eq('name', employeeName)
+        .single();
+
+    if (!employee) {
+        return { success: false, message: `找不到員工「${employeeName}」` };
+    }
+
+    const { data: lastRecord } = await supabase
+        .from('agent_task_records')
+        .select('id, task_id, completed_at')
+        .eq('employee_id', employee.id)
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .single();
+
+    if (!lastRecord) {
+        return { success: false, message: `${employeeName} 沒有完成記錄可以取消` };
+    }
+
+    const { data: task } = await supabase
+        .from('agent_tasks')
+        .select('task_name, client_name')
+        .eq('id', lastRecord.task_id)
+        .single();
+
+    await supabase
+        .from('agent_task_records')
+        .delete()
+        .eq('id', lastRecord.id);
+
+    return {
+        success: true,
+        message: `✅ 已取消「${task?.client_name} - ${task?.task_name}」的完成記錄`
+    };
+}
+
+// 刪除任務
+export async function deleteTask(employeeName: string, taskName: string) {
+    const { data: employee } = await supabase
+        .from('agent_employees')
+        .select('id')
+        .eq('name', employeeName)
+        .single();
+
+    if (!employee) {
+        return { success: false, message: `找不到員工「${employeeName}」` };
+    }
+
+    const { data: task } = await supabase
+        .from('agent_tasks')
+        .select('id, task_name, client_name')
+        .eq('employee_id', employee.id)
+        .ilike('task_name', `%${taskName}%`)
+        .single();
+
+    if (!task) {
+        return { success: false, message: `找不到任務「${taskName}」` };
+    }
+
+    await supabase
+        .from('agent_tasks')
+        .delete()
+        .eq('id', task.id);
+
+    return {
+        success: true,
+        message: `✅ 已刪除「${task.client_name} - ${task.task_name}」`
+    };
+}
+
+// 修改任務
+export async function updateTask(employeeName: string, taskName: string, newFrequencyDetail: string) {
+    const { data: employee } = await supabase
+        .from('agent_employees')
+        .select('id')
+        .eq('name', employeeName)
+        .single();
+
+    if (!employee) {
+        return { success: false, message: `找不到員工「${employeeName}」` };
+    }
+
+    const { data: task } = await supabase
+        .from('agent_tasks')
+        .select('id, task_name, client_name')
+        .eq('employee_id', employee.id)
+        .ilike('task_name', `%${taskName}%`)
+        .single();
+
+    if (!task) {
+        return { success: false, message: `找不到任務「${taskName}」` };
+    }
+
+    await supabase
+        .from('agent_tasks')
+        .update({ frequency_detail: newFrequencyDetail })
+        .eq('id', task.id);
+
+    return {
+        success: true,
+        message: `✅ 已修改「${task.client_name} - ${task.task_name}」\n🔄 新頻率：${newFrequencyDetail}`
+    };
+}
+
+// 設定提醒
+export async function setReminder(reminderTime: string, reminderContent: string, groupId: string) {
+    let targetTime: Date;
+    const now = new Date();
+
+    // 處理「X分鐘後」
+    const minutesMatch = reminderTime.match(/(\d+)\s*(分鐘|分)/);
+    if (minutesMatch) {
+        targetTime = new Date(now.getTime() + parseInt(minutesMatch[1]) * 60 * 1000);
+    }
+    // 處理「X小時後」
+    else if (reminderTime.match(/(\d+)\s*(小時|時)/)) {
+        const hours = parseInt(reminderTime.match(/(\d+)/)?.[1] || '1');
+        targetTime = new Date(now.getTime() + hours * 60 * 60 * 1000);
+    }
+    // 處理「下午X點」或「15:00」
+    else {
+        let hour = 0;
+        let minute = 0;
+
+        const timeMatch = reminderTime.match(/(\d{1,2}):(\d{2})/);
+        const pmMatch = reminderTime.match(/下午\s*(\d{1,2})\s*點/);
+        const amMatch = reminderTime.match(/上午\s*(\d{1,2})\s*點/);
+        const simpleMatch = reminderTime.match(/(\d{1,2})\s*點/);
+
+        if (timeMatch) {
+            hour = parseInt(timeMatch[1]);
+            minute = parseInt(timeMatch[2]);
+        } else if (pmMatch) {
+            hour = parseInt(pmMatch[1]) + 12;
+        } else if (amMatch) {
+            hour = parseInt(amMatch[1]);
+        } else if (simpleMatch) {
+            hour = parseInt(simpleMatch[1]);
+            if (hour < 6) hour += 12;
+        }
+
+        targetTime = new Date(now);
+        targetTime.setHours(hour, minute, 0, 0);
+
+        if (targetTime <= now) {
+            targetTime.setDate(targetTime.getDate() + 1);
+        }
+    }
+
+    await supabase.from('agent_reminders').insert({
+        group_id: groupId,
+        reminder_time: targetTime.toISOString(),
+        content: reminderContent,
+        is_sent: false
+    });
+
+    const timeStr = targetTime.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+
+    return {
+        success: true,
+        message: `⏰ 已設定提醒！\n📅 ${timeStr}\n📝 ${reminderContent}`
+    };
+}
+
+// 設定線上會議
+export async function scheduleMeeting(targetGroupName: string, meetingDate: string, meetingTime: string) {
+    // 固定的會議連結
+    const MEETING_LINK = 'https://meet.google.com/wta-wwbd-yiw';
+
+    // 查找群組
+    const { data: group } = await supabase
+        .from('agent_groups')
+        .select('line_group_id, group_name')
+        .ilike('group_name', `%${targetGroupName}%`)
+        .single();
+
+    if (!group) {
+        return { success: false, message: `找不到群組「${targetGroupName}」` };
+    }
+
+    // 解析日期
+    const now = new Date();
+    let targetDate = new Date(now);
+
+    if (meetingDate.includes('明天')) {
+        targetDate.setDate(now.getDate() + 1);
+    } else if (meetingDate.includes('後天')) {
+        targetDate.setDate(now.getDate() + 2);
+    } else if (meetingDate.includes('下週') || meetingDate.includes('下周')) {
+        const dayMap: { [key: string]: number } = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 0
+        };
+        const dayMatch = meetingDate.match(/[一二三四五六日]/);
+        if (dayMatch) {
+            const targetDay = dayMap[dayMatch[0]];
+            const currentDay = now.getDay();
+            let daysToAdd = targetDay - currentDay;
+            if (daysToAdd <= 0) daysToAdd += 7;
+            daysToAdd += 7; // 下週
+            targetDate.setDate(now.getDate() + daysToAdd);
+        }
+    } else if (meetingDate.includes('這週') || meetingDate.includes('這周') || meetingDate.includes('週') || meetingDate.includes('周')) {
+        const dayMap: { [key: string]: number } = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 0
+        };
+        const dayMatch = meetingDate.match(/[一二三四五六日]/);
+        if (dayMatch) {
+            const targetDay = dayMap[dayMatch[0]];
+            const currentDay = now.getDay();
+            let daysToAdd = targetDay - currentDay;
+            if (daysToAdd <= 0) daysToAdd += 7;
+            targetDate.setDate(now.getDate() + daysToAdd);
+        }
+    } else {
+        // 嘗試解析 1/30 或 2/5 格式
+        const dateMatch = meetingDate.match(/(\d{1,2})\/(\d{1,2})/);
+        if (dateMatch) {
+            targetDate.setMonth(parseInt(dateMatch[1]) - 1);
+            targetDate.setDate(parseInt(dateMatch[2]));
+            if (targetDate < now) {
+                targetDate.setFullYear(targetDate.getFullYear() + 1);
+            }
+        }
+    }
+
+    // 解析時間
+    let hour = 14;
+    let minute = 0;
+
+    const timeMatch24 = meetingTime.match(/(\d{1,2}):(\d{2})/);
+    const timePM = meetingTime.match(/下午\s*(\d{1,2})\s*點/);
+    const timeAM = meetingTime.match(/上午\s*(\d{1,2})\s*點/);
+    const timeSimple = meetingTime.match(/(\d{1,2})\s*點/);
+
+    if (timeMatch24) {
+        hour = parseInt(timeMatch24[1]);
+        minute = parseInt(timeMatch24[2]);
+    } else if (timePM) {
+        hour = parseInt(timePM[1]) + 12;
+    } else if (timeAM) {
+        hour = parseInt(timeAM[1]);
+    } else if (timeSimple) {
+        hour = parseInt(timeSimple[1]);
+        // 如果是 1-6 點，假設是下午
+        if (hour >= 1 && hour <= 6) hour += 12;
+    }
+
+    targetDate.setHours(hour, minute, 0, 0);
+
+    // 格式化日期時間
+    const dateStr = targetDate.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'long' });
+    const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+
+    // 儲存提醒
+    const meetingContent = `【開會提醒】開會囉！\n⏰ 時間：${dateStr} ${timeStr}\n🔗 會議連結：${MEETING_LINK}`;
+
+    await supabase.from('agent_reminders').insert({
+        group_id: group.line_group_id,
+        reminder_time: targetDate.toISOString(),
+        content: meetingContent,
+        is_sent: false
+    });
+
+    return {
+        success: true,
+        message: `✅ 已設定會議提醒！\n👥 ${group.group_name}\n📅 ${dateStr} ${timeStr}\n🔗 ${MEETING_LINK}`
+    };
 }
 
 // 新增任務
@@ -149,10 +444,7 @@ export async function addTask(
 }
 
 // 完成任務（智慧比對）
-export async function completeTask(
-    employeeId: string,
-    messageText: string
-) {
+export async function completeTask(employeeId: string, messageText: string) {
     const { data: tasks } = await supabase
         .from('agent_tasks')
         .select('id, task_name, client_name')
@@ -236,27 +528,25 @@ export async function getEmployeeTasks(employeeId: string) {
     return message;
 }
 
-// 解析客戶訊息（給 Web 儀表板用）
+// 解析客戶訊息
 export async function parseCustomerMessage(text: string): Promise<{
     type: 'urgent' | 'question' | 'payment' | 'general';
     reply: string;
 }> {
-    const prompt = `你是客服助理。分析客戶訊息，判斷類型並給出適當回覆。
+    const prompt = `你是客服助理。分析客戶訊息，判斷類型。
 
 客戶訊息：「${text}」
 
 類型判斷：
 - urgent：緊急、投訴、抱怨、不滿、退款、很急、馬上要、今天要
-- question：問題、疑問、怪怪的、怎麼做、為什麼、這樣對嗎
+- question：問題、疑問、怪怪的、怎麼做、為什麼、這樣對嗎、請問
 - payment：轉帳、匯款、付款、已付、已匯、給你錢
-- general：一般訊息、打招呼、謝謝、好的
-
-回覆風格：簡短、親切、專業、加上表情符號
+- general：一般訊息、打招呼、謝謝、好的、OK、了解、討論中
 
 請回傳 JSON：
 {
   "type": "urgent | question | payment | general",
-  "reply": "回覆內容（20字內）"
+  "reply": ""
 }
 
 只回傳 JSON，不要其他文字。`;
@@ -273,6 +563,6 @@ export async function parseCustomerMessage(text: string): Promise<{
         return JSON.parse(cleaned);
     } catch (error) {
         console.error('Customer parse error:', error);
-        return { type: 'general', reply: '收到了，會儘速回覆您！👍' };
+        return { type: 'general', reply: '' };
     }
 }

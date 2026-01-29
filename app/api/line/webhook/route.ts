@@ -2,7 +2,19 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { parseMessage, parseCustomerMessage, addTask, completeTask, getEmployeeTasks, sendMessageToGroup } from '@/lib/ai-parser';
+import {
+    parseMessage,
+    parseCustomerMessage,
+    addTask,
+    completeTask,
+    getEmployeeTasks,
+    sendMessageToGroup,
+    cancelLastRecord,
+    deleteTask,
+    updateTask,
+    setReminder,
+    scheduleMeeting
+} from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
 
@@ -70,7 +82,7 @@ export async function POST(request: NextRequest) {
             const userId = event.source?.userId;
             const replyToken = event.replyToken;
 
-            // 機器人加入群組 → 記錄 group ID
+            // 機器人加入群組
             if (event.type === 'join') {
                 if (groupId) {
                     const groupName = await getGroupName(groupId);
@@ -88,10 +100,8 @@ export async function POST(request: NextRequest) {
                             group_type: 'customer',
                             is_active: true
                         });
-                        console.log('新群組已記錄:', groupName, groupId);
                     }
 
-                    // 同時寫入會計系統的表
                     const { data: existingAcct } = await supabase
                         .from('acct_line_groups')
                         .select('id')
@@ -129,7 +139,7 @@ export async function POST(request: NextRequest) {
                 const text = event.message.text.trim();
                 const textLower = text.toLowerCase();
 
-                // 查詢 Group ID 指令（所有群組都可用）
+                // 查詢 Group ID
                 if (textLower === '!groupid' || textLower === '/groupid' || textLower === 'groupid') {
                     if (replyToken) {
                         let reply = '';
@@ -158,9 +168,8 @@ export async function POST(request: NextRequest) {
                     groupName = group?.group_name || '';
                 }
 
-                // 收集客戶、合作夥伴、會計群組的訊息
+                // 客戶、合作夥伴、會計群組
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
-                    // 記錄訊息
                     await supabase.from('agent_customer_messages').insert({
                         group_id: groupId,
                         group_name: groupName,
@@ -169,12 +178,9 @@ export async function POST(request: NextRequest) {
                         message: text,
                         is_replied: false
                     });
-                    console.log('已記錄訊息:', groupName, text);
 
-                    // AI 判斷是否需要通知
                     const parsed = await parseCustomerMessage(text);
 
-                    // 只有緊急、問題、付款才通知
                     if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
                         const { data: managerGroup } = await supabase
                             .from('agent_groups')
@@ -192,17 +198,15 @@ export async function POST(request: NextRequest) {
                             await pushMessage(managerGroup.line_group_id, notifyText);
                         }
                     }
-
                     continue;
                 }
 
                 // 公司群組不處理
                 if (groupType === 'company') {
-                    console.log('公司群組，不處理:', text);
                     continue;
                 }
 
-                // 員工群組只處理「完成任務」
+                // 員工群組
                 if (groupType === 'employee') {
                     const parsed = await parseMessage(text, groupType);
 
@@ -220,16 +224,15 @@ export async function POST(request: NextRequest) {
                             }
                         }
                     }
-                    // 其他訊息不回應
                     continue;
                 }
 
-                // 主管群組處理所有指令
+                // 主管群組
                 if (groupType === 'manager') {
                     const parsed = await parseMessage(text, groupType);
                     console.log('AI 解析結果:', parsed);
 
-                    // 發送訊息到其他群組
+                    // 發送訊息
                     if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
                         const result = await sendMessageToGroup(parsed.target_group, parsed.message_content);
                         if (replyToken) {
@@ -238,6 +241,52 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // 取消回報
+                    if (parsed.intent === 'cancel_record' && parsed.employee_name) {
+                        const result = await cancelLastRecord(parsed.employee_name);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 刪除任務
+                    if (parsed.intent === 'delete_task' && parsed.employee_name && parsed.task_name) {
+                        const result = await deleteTask(parsed.employee_name, parsed.task_name);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 修改任務
+                    if (parsed.intent === 'update_task' && parsed.employee_name && parsed.task_name && parsed.frequency_detail) {
+                        const result = await updateTask(parsed.employee_name, parsed.task_name, parsed.frequency_detail);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定提醒
+                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
+                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定線上會議
+                    if (parsed.intent === 'schedule_meeting' && parsed.target_group && parsed.meeting_date && parsed.reminder_time) {
+                        const result = await scheduleMeeting(parsed.target_group, parsed.meeting_date, parsed.reminder_time);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 新增任務
                     if (parsed.intent === 'add_task' && parsed.employee_name) {
                         const result = await addTask(
                             parsed.employee_name,
@@ -252,6 +301,7 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // 查詢任務
                     if (parsed.intent === 'query_tasks' && parsed.employee_name) {
                         const { data: employee } = await supabase
                             .from('agent_employees')
@@ -267,12 +317,8 @@ export async function POST(request: NextRequest) {
                         }
                         continue;
                     }
-                    // 主管群其他訊息不回應
                     continue;
                 }
-
-                // 其他訊息不處理
-                console.log('未處理訊息:', text);
             }
         }
 
