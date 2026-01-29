@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { parseMessage, addTask, completeTask, getEmployeeTasks, sendMessageToGroup } from '@/lib/ai-parser';
+import { parseMessage, parseCustomerMessage, addTask, completeTask, getEmployeeTasks, sendMessageToGroup } from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
 
@@ -158,8 +158,9 @@ export async function POST(request: NextRequest) {
                     groupName = group?.group_name || '';
                 }
 
-                // 收集客戶、合作夥伴、會計群組的訊息（不自動回覆）
+                // 收集客戶、合作夥伴、會計群組的訊息
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
+                    // 記錄訊息
                     await supabase.from('agent_customer_messages').insert({
                         group_id: groupId,
                         group_name: groupName,
@@ -170,16 +171,26 @@ export async function POST(request: NextRequest) {
                     });
                     console.log('已記錄訊息:', groupName, text);
 
-                    // 轉發到主管群
-                    const { data: managerGroup } = await supabase
-                        .from('agent_groups')
-                        .select('line_group_id')
-                        .eq('group_type', 'manager')
-                        .single();
+                    // AI 判斷是否需要通知
+                    const parsed = await parseCustomerMessage(text);
 
-                    if (managerGroup) {
-                        const notifyText = `📩 【${groupName}】有新訊息：\n\n${text}`;
-                        await pushMessage(managerGroup.line_group_id, notifyText);
+                    // 只有緊急、問題、付款才通知
+                    if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
+                        const { data: managerGroup } = await supabase
+                            .from('agent_groups')
+                            .select('line_group_id')
+                            .eq('group_type', 'manager')
+                            .single();
+
+                        if (managerGroup) {
+                            let typeLabel = '📩';
+                            if (parsed.type === 'urgent') typeLabel = '🚨 緊急';
+                            if (parsed.type === 'question') typeLabel = '❓ 問題';
+                            if (parsed.type === 'payment') typeLabel = '💰 付款';
+
+                            const notifyText = `${typeLabel}【${groupName}】：\n\n${text}`;
+                            await pushMessage(managerGroup.line_group_id, notifyText);
+                        }
                     }
 
                     continue;
