@@ -83,7 +83,7 @@ export async function sendMessageToGroup(targetGroupName: string, messageContent
     // 查找群組
     const { data: group } = await supabase
         .from('agent_groups')
-        .select('group_id, group_name')
+        .select('line_group_id, group_name')
         .ilike('group_name', `%${targetGroupName}%`)
         .single();
 
@@ -99,7 +99,7 @@ export async function sendMessageToGroup(targetGroupName: string, messageContent
             'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
         },
         body: JSON.stringify({
-            to: group.group_id,
+            to: group.line_group_id,
             messages: [{ type: 'text', text: messageContent }],
         }),
     });
