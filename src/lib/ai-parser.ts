@@ -69,7 +69,6 @@ export async function addTask(
     frequency: string,
     frequencyDetail: string
 ) {
-    // 找員工
     const { data: employee } = await supabase
         .from('agent_employees')
         .select('id')
@@ -80,7 +79,6 @@ export async function addTask(
         return { success: false, message: `找不到員工「${employeeName}」` };
     }
 
-    // 新增任務
     const { error } = await supabase.from('agent_tasks').insert({
         task_name: taskName,
         client_name: clientName,
@@ -105,7 +103,6 @@ export async function completeTask(
     employeeId: string,
     messageText: string
 ) {
-    // 先撈出該員工的所有任務
     const { data: tasks } = await supabase
         .from('agent_tasks')
         .select('id, task_name, client_name')
@@ -116,12 +113,10 @@ export async function completeTask(
         return { success: false, message: '你目前沒有任務' };
     }
 
-    // 組成任務列表
     const taskList = tasks.map((t, i) =>
         `${i + 1}. ${t.client_name} - ${t.task_name}`
     ).join('\n');
 
-    // 問 AI 這句話最可能是哪個任務
     const prompt = `員工說：「${messageText}」
 
 他的任務列表：
@@ -146,14 +141,12 @@ ${taskList}
 
         const task = tasks[taskIndex];
 
-        // 記錄完成
         await supabase.from('agent_task_records').insert({
             task_id: task.id,
             employee_id: employeeId,
             completed_at: new Date().toISOString(),
         });
 
-        // 查詢今日剩餘任務數
         const today = new Date().toISOString().split('T')[0];
         const { count: completedCount } = await supabase
             .from('agent_task_records')
@@ -191,4 +184,56 @@ export async function getEmployeeTasks(employeeId: string) {
     });
 
     return message;
+}
+
+// 解析客戶訊息
+export async function parseCustomerMessage(text: string): Promise<{
+    type: 'urgent' | 'question' | 'payment' | 'general';
+    reply: string;
+}> {
+    const prompt = `你是客服助理。分析客戶訊息，判斷類型並給出適當回覆。
+
+客戶訊息：「${text}」
+
+類型判斷：
+- urgent：緊急、投訴、抱怨、不滿、退款、很急、馬上要、今天要
+- question：問題、疑問、怪怪的、怎麼做、為什麼、這樣對嗎
+- payment：轉帳、匯款、付款、已付、已匯、給你錢
+- general：一般訊息、打招呼、謝謝、好的
+
+回覆風格：簡短、親切、專業、加上表情符號
+
+請回傳 JSON：
+{
+  "type": "urgent | question | payment | general",
+  "reply": "回覆內容（20字內）"
+}
+
+範例：
+- 「這邊怪怪的」→ {"type": "question", "reply": "稍等，我們確認後回覆您～ 🔍"}
+- 「這個怎麼做？」→ {"type": "question", "reply": "收到！確認後回覆您 😊"}
+- 「已轉帳」→ {"type": "payment", "reply": "收到，我們確認一下！💰"}
+- 「匯款了喔」→ {"type": "payment", "reply": "好的，確認後通知您 ✨"}
+- 「很急！拜託快點」→ {"type": "urgent", "reply": "收到！我們儘速處理 🙏"}
+- 「為什麼還沒好」→ {"type": "urgent", "reply": "抱歉久等了，馬上確認！🏃"}
+- 「謝謝」→ {"type": "general", "reply": "不客氣～有需要隨時說 😊"}
+- 「你好」→ {"type": "general", "reply": "您好！有什麼可以幫您的嗎？✨"}
+- 「好的」→ {"type": "general", "reply": "收到了，會儘速回覆您！👍"}
+
+只回傳 JSON，不要其他文字。`;
+
+    try {
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.3,
+        });
+
+        const content = response.choices[0]?.message?.content || '{}';
+        const cleaned = content.replace(/```json\n?|\n?```/g, '').trim();
+        return JSON.parse(cleaned);
+    } catch (error) {
+        console.error('Customer parse error:', error);
+        return { type: 'general', reply: '收到了，會儘速回覆您！👍' };
+    }
 }

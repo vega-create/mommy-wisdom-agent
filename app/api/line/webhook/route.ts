@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { parseMessage, addTask, completeTask, getEmployeeTasks } from '@/lib/ai-parser';
+import { parseMessage, addTask, completeTask, getEmployeeTasks, parseCustomerMessage } from '@/lib/ai-parser';
 
 const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
 
@@ -17,6 +17,22 @@ async function replyMessage(replyToken: string, text: string) {
         },
         body: JSON.stringify({
             replyToken,
+            messages: [{ type: 'text', text }]
+        }),
+    });
+}
+
+async function pushMessage(groupId: string, text: string) {
+    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+    await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+            to: groupId,
             messages: [{ type: 'text', text }]
         }),
     });
@@ -117,6 +133,41 @@ export async function POST(request: NextRequest) {
                     groupType = group?.group_type || 'employee';
                 }
 
+                // 客戶群組智慧回覆
+                if (groupType === 'customer') {
+                    const result = await parseCustomerMessage(text);
+
+                    // 回覆客戶
+                    if (replyToken) {
+                        await replyMessage(replyToken, result.reply);
+                    }
+
+                    // 緊急訊息通知主管
+                    if (result.type === 'urgent') {
+                        const { data: managerGroup } = await supabase
+                            .from('agent_groups')
+                            .select('line_group_id')
+                            .eq('group_type', 'manager')
+                            .eq('is_active', true)
+                            .single();
+
+                        if (managerGroup?.line_group_id) {
+                            const { data: customerGroup } = await supabase
+                                .from('agent_groups')
+                                .select('group_name')
+                                .eq('line_group_id', groupId)
+                                .single();
+
+                            const groupName = customerGroup?.group_name || '客戶群';
+                            await pushMessage(
+                                managerGroup.line_group_id,
+                                `🚨 緊急客戶訊息\n\n群組：${groupName}\n內容：${text}`
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 // AI 解析訊息
                 const parsed = await parseMessage(text, groupType);
                 console.log('AI 解析結果:', parsed);
@@ -137,7 +188,6 @@ export async function POST(request: NextRequest) {
                 }
 
                 if (parsed.intent === 'complete_task') {
-                    // 找出這個群組對應的員工
                     const { data: group } = await supabase
                         .from('agent_groups')
                         .select('employee_id')
@@ -147,7 +197,7 @@ export async function POST(request: NextRequest) {
                     if (group?.employee_id) {
                         const result = await completeTask(
                             group.employee_id,
-                            text  // 傳入原始訊息，讓 AI 比對
+                            text
                         );
                         if (replyToken) {
                             await replyMessage(replyToken, result.message);
