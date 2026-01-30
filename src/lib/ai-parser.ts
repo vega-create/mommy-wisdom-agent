@@ -305,7 +305,7 @@ export async function setReminder(reminderTime: string, reminderContent: string,
         targetTime = new Date(targetTaiwan.getTime() - taiwanOffset);
     }
 
-    await supabase.from('agent_reminders').insert({
+    await supabase.from('agent_personal_reminders').insert({
         group_id: groupId,
         reminder_time: targetTime.toISOString(),
         content: reminderContent,
@@ -422,7 +422,7 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
     // 儲存提醒
     const meetingContent = `【開會提醒】開會囉！\n⏰ 時間：${dateStr} ${timeStr}\n🔗 會議連結：${MEETING_LINK}`;
 
-    await supabase.from('agent_reminders').insert({
+    await supabase.from('agent_personal_reminders').insert({
         group_id: group.line_group_id,
         reminder_time: targetUTC.toISOString(),
         content: meetingContent,
