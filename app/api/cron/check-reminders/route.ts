@@ -8,7 +8,7 @@ export async function POST() {
         const now = new Date().toISOString();
 
         const { data: reminders } = await supabase
-            .from('agent_reminders')
+            .from('agent_personal_reminders')
             .select('*')
             .eq('is_sent', false)
             .lte('reminder_time', now);
@@ -31,7 +31,7 @@ export async function POST() {
             });
 
             await supabase
-                .from('agent_reminders')
+                .from('agent_personal_reminders')
                 .update({ is_sent: true })
                 .eq('id', reminder.id);
         }
