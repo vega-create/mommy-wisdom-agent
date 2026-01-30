@@ -19,11 +19,9 @@ export async function POST() {
         if (!employees) return NextResponse.json({ success: true });
 
         for (const emp of employees) {
-            // 週末只提醒 Vega
             if (isWeekend && emp.name !== 'Vega') continue;
             if (!emp.line_group_id) continue;
 
-            // 取得該員工的任務
             const { data: tasks } = await supabase
                 .from('agent_tasks')
                 .select('id, task_name, client_name, frequency_detail')
@@ -32,17 +30,14 @@ export async function POST() {
 
             if (!tasks || tasks.length === 0) continue;
 
-            // 篩選今天要做的任務
             const todayTasks = tasks.filter(task => {
                 const detail = task.frequency_detail || '';
                 if (detail === '每天') return true;
                 if (detail === '不固定') return false;
                 if (detail.includes(todayName)) return true;
-                if (detail.includes('週' + todayName)) return true;
                 return false;
             });
 
-            // 查今天已完成的
             const { data: completedToday } = await supabase
                 .from('agent_task_records')
                 .select('task_id')
@@ -50,8 +45,6 @@ export async function POST() {
                 .gte('completed_at', todayStr);
 
             const completedIds = (completedToday || []).map(r => r.task_id);
-
-            // 今天還沒完成的
             const unfinishedTasks = todayTasks.filter(t => !completedIds.includes(t.id));
 
             if (unfinishedTasks.length === 0) continue;
