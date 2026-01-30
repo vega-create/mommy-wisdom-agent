@@ -71,6 +71,7 @@ export async function parseMessage(text: string, groupType: string): Promise<Par
    ✓「提醒我下午3點開會」
    ✓「30分鐘後提醒我打電話」
    ✓「15:00提醒開會」
+   ✓「明天提醒我XXX」
 
 9. schedule_meeting：設定線上會議（發送到客戶/員工群）
    ✓「給寵樂芙設定線上開會，時間是下週三2:00」
@@ -244,33 +245,41 @@ export async function updateTask(employeeName: string, taskName: string, newFreq
 // 設定提醒
 export async function setReminder(reminderTime: string, reminderContent: string, groupId: string) {
     let targetTime: Date;
-    const now = new Date();
+    
+    // 取得台灣時間
+    const nowUTC = new Date();
+    const taiwanOffset = 8 * 60 * 60 * 1000; // UTC+8
+    const nowTaiwan = new Date(nowUTC.getTime() + taiwanOffset);
+
+    // 處理「明天」
+    const isTomorrow = reminderTime.includes('明天');
 
     // 處理「X分鐘後」
     const minutesMatch = reminderTime.match(/(\d+)\s*(分鐘|分)/);
     if (minutesMatch) {
-        targetTime = new Date(now.getTime() + parseInt(minutesMatch[1]) * 60 * 1000);
+        targetTime = new Date(nowUTC.getTime() + parseInt(minutesMatch[1]) * 60 * 1000);
     }
     // 處理「X小時後」
     else if (reminderTime.match(/(\d+)\s*(小時|時)/)) {
         const hours = parseInt(reminderTime.match(/(\d+)/)?.[1] || '1');
-        targetTime = new Date(now.getTime() + hours * 60 * 60 * 1000);
+        targetTime = new Date(nowUTC.getTime() + hours * 60 * 60 * 1000);
     }
     // 處理「下午X點」或「15:00」
     else {
-        let hour = 0;
+        let hour = 9;
         let minute = 0;
 
         const timeMatch = reminderTime.match(/(\d{1,2}):(\d{2})/);
-        const pmMatch = reminderTime.match(/下午\s*(\d{1,2})\s*點/);
-        const amMatch = reminderTime.match(/上午\s*(\d{1,2})\s*點/);
+        const pmMatch = reminderTime.match(/下午\s*(\d{1,2})\s*點?/);
+        const amMatch = reminderTime.match(/上午\s*(\d{1,2})\s*點?/);
         const simpleMatch = reminderTime.match(/(\d{1,2})\s*點/);
 
         if (timeMatch) {
             hour = parseInt(timeMatch[1]);
             minute = parseInt(timeMatch[2]);
         } else if (pmMatch) {
-            hour = parseInt(pmMatch[1]) + 12;
+            hour = parseInt(pmMatch[1]);
+            if (hour < 12) hour += 12;
         } else if (amMatch) {
             hour = parseInt(amMatch[1]);
         } else if (simpleMatch) {
@@ -278,12 +287,22 @@ export async function setReminder(reminderTime: string, reminderContent: string,
             if (hour < 6) hour += 12;
         }
 
-        targetTime = new Date(now);
-        targetTime.setHours(hour, minute, 0, 0);
-
-        if (targetTime <= now) {
-            targetTime.setDate(targetTime.getDate() + 1);
+        // 建立台灣時間的目標時間
+        const targetTaiwan = new Date(nowTaiwan);
+        
+        if (isTomorrow) {
+            targetTaiwan.setDate(targetTaiwan.getDate() + 1);
         }
+        
+        targetTaiwan.setHours(hour, minute, 0, 0);
+
+        // 如果時間已過且不是明天，設為明天
+        if (targetTaiwan <= nowTaiwan && !isTomorrow) {
+            targetTaiwan.setDate(targetTaiwan.getDate() + 1);
+        }
+
+        // 轉回 UTC 存入資料庫
+        targetTime = new Date(targetTaiwan.getTime() - taiwanOffset);
     }
 
     await supabase.from('agent_reminders').insert({
@@ -293,11 +312,14 @@ export async function setReminder(reminderTime: string, reminderContent: string,
         is_sent: false
     });
 
-    const timeStr = targetTime.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    // 顯示用台灣時間
+    const displayTime = new Date(targetTime.getTime() + taiwanOffset);
+    const dateStr = `${displayTime.getMonth() + 1}/${displayTime.getDate()}`;
+    const timeStr = `${displayTime.getHours().toString().padStart(2, '0')}:${displayTime.getMinutes().toString().padStart(2, '0')}`;
 
     return {
         success: true,
-        message: `⏰ 已設定提醒！\n📅 ${timeStr}\n📝 ${reminderContent}`
+        message: `⏰ 已設定提醒！\n📅 ${dateStr} ${timeStr}\n📝 ${reminderContent}`
     };
 }
 
@@ -305,6 +327,11 @@ export async function setReminder(reminderTime: string, reminderContent: string,
 export async function scheduleMeeting(targetGroupName: string, meetingDate: string, meetingTime: string) {
     // 固定的會議連結
     const MEETING_LINK = 'https://meet.google.com/wta-wwbd-yiw';
+
+    // 取得台灣時間
+    const nowUTC = new Date();
+    const taiwanOffset = 8 * 60 * 60 * 1000;
+    const nowTaiwan = new Date(nowUTC.getTime() + taiwanOffset);
 
     // 查找群組
     const { data: group } = await supabase
@@ -318,13 +345,12 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
     }
 
     // 解析日期
-    const now = new Date();
-    let targetDate = new Date(now);
+    let targetDate = new Date(nowTaiwan);
 
     if (meetingDate.includes('明天')) {
-        targetDate.setDate(now.getDate() + 1);
+        targetDate.setDate(nowTaiwan.getDate() + 1);
     } else if (meetingDate.includes('後天')) {
-        targetDate.setDate(now.getDate() + 2);
+        targetDate.setDate(nowTaiwan.getDate() + 2);
     } else if (meetingDate.includes('下週') || meetingDate.includes('下周')) {
         const dayMap: { [key: string]: number } = {
             '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 0
@@ -332,11 +358,11 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
         const dayMatch = meetingDate.match(/[一二三四五六日]/);
         if (dayMatch) {
             const targetDay = dayMap[dayMatch[0]];
-            const currentDay = now.getDay();
+            const currentDay = nowTaiwan.getDay();
             let daysToAdd = targetDay - currentDay;
             if (daysToAdd <= 0) daysToAdd += 7;
             daysToAdd += 7; // 下週
-            targetDate.setDate(now.getDate() + daysToAdd);
+            targetDate.setDate(nowTaiwan.getDate() + daysToAdd);
         }
     } else if (meetingDate.includes('這週') || meetingDate.includes('這周') || meetingDate.includes('週') || meetingDate.includes('周')) {
         const dayMap: { [key: string]: number } = {
@@ -345,10 +371,10 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
         const dayMatch = meetingDate.match(/[一二三四五六日]/);
         if (dayMatch) {
             const targetDay = dayMap[dayMatch[0]];
-            const currentDay = now.getDay();
+            const currentDay = nowTaiwan.getDay();
             let daysToAdd = targetDay - currentDay;
             if (daysToAdd <= 0) daysToAdd += 7;
-            targetDate.setDate(now.getDate() + daysToAdd);
+            targetDate.setDate(nowTaiwan.getDate() + daysToAdd);
         }
     } else {
         // 嘗試解析 1/30 或 2/5 格式
@@ -356,7 +382,7 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
         if (dateMatch) {
             targetDate.setMonth(parseInt(dateMatch[1]) - 1);
             targetDate.setDate(parseInt(dateMatch[2]));
-            if (targetDate < now) {
+            if (targetDate < nowTaiwan) {
                 targetDate.setFullYear(targetDate.getFullYear() + 1);
             }
         }
@@ -367,35 +393,38 @@ export async function scheduleMeeting(targetGroupName: string, meetingDate: stri
     let minute = 0;
 
     const timeMatch24 = meetingTime.match(/(\d{1,2}):(\d{2})/);
-    const timePM = meetingTime.match(/下午\s*(\d{1,2})\s*點/);
-    const timeAM = meetingTime.match(/上午\s*(\d{1,2})\s*點/);
+    const timePM = meetingTime.match(/下午\s*(\d{1,2})\s*點?/);
+    const timeAM = meetingTime.match(/上午\s*(\d{1,2})\s*點?/);
     const timeSimple = meetingTime.match(/(\d{1,2})\s*點/);
 
     if (timeMatch24) {
         hour = parseInt(timeMatch24[1]);
         minute = parseInt(timeMatch24[2]);
     } else if (timePM) {
-        hour = parseInt(timePM[1]) + 12;
+        hour = parseInt(timePM[1]);
+        if (hour < 12) hour += 12;
     } else if (timeAM) {
         hour = parseInt(timeAM[1]);
     } else if (timeSimple) {
         hour = parseInt(timeSimple[1]);
-        // 如果是 1-6 點，假設是下午
         if (hour >= 1 && hour <= 6) hour += 12;
     }
 
     targetDate.setHours(hour, minute, 0, 0);
 
-    // 格式化日期時間
-    const dateStr = targetDate.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'long' });
+    // 格式化日期時間（台灣時間顯示）
+    const dateStr = `${targetDate.getMonth() + 1}/${targetDate.getDate()}`;
     const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+
+    // 轉回 UTC 存入資料庫
+    const targetUTC = new Date(targetDate.getTime() - taiwanOffset);
 
     // 儲存提醒
     const meetingContent = `【開會提醒】開會囉！\n⏰ 時間：${dateStr} ${timeStr}\n🔗 會議連結：${MEETING_LINK}`;
 
     await supabase.from('agent_reminders').insert({
         group_id: group.line_group_id,
-        reminder_time: targetDate.toISOString(),
+        reminder_time: targetUTC.toISOString(),
         content: meetingContent,
         is_sent: false
     });
