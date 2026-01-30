@@ -1,6 +1,24 @@
-export async function GET() {
+export const dynamic = 'force-dynamic';
+
+import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabase';
+
+async function pushMessage(groupId: string, text: string) {
+    await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        },
+        body: JSON.stringify({
+            to: groupId,
+            messages: [{ type: 'text', text }],
+        }),
+    });
+}
+
+export async function POST() {
     try {
-        // 取得主管群
         const { data: managerGroup } = await supabase
             .from('agent_groups')
             .select('line_group_id')
@@ -12,7 +30,6 @@ export async function GET() {
             return NextResponse.json({ success: true, message: 'No manager group' });
         }
 
-        // 取得所有員工
         const { data: employees } = await supabase
             .from('agent_employees')
             .select('id, name')
@@ -24,14 +41,12 @@ export async function GET() {
         let report = `📊 ${today} 每日報表\n\n`;
 
         for (const emp of employees) {
-            // 取得員工任務數
             const { count: totalTasks } = await supabase
                 .from('agent_tasks')
                 .select('*', { count: 'exact', head: true })
                 .eq('employee_id', emp.id)
                 .eq('is_active', true);
 
-            // 取得今日完成數
             const { count: completedTasks } = await supabase
                 .from('agent_task_records')
                 .select('*', { count: 'exact', head: true })
@@ -52,4 +67,8 @@ export async function GET() {
         console.error('Daily report error:', error);
         return NextResponse.json({ error: 'Failed' }, { status: 500 });
     }
+}
+
+export async function GET() {
+    return POST();
 }
