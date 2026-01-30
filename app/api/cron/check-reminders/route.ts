@@ -46,27 +46,3 @@ export async function POST() {
 export async function GET() {
     return POST();
 }
-
-
-export const dynamic = 'force-dynamic';
-
-import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-
-const LINE_API_URL = 'https://api.line.me/v2/bot/message/push';
-
-async function pushMessage(groupId: string, text: string) {
-    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-    await fetch(LINE_API_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-            to: groupId,
-            messages: [{ type: 'text', text }]
-        }),
-    });
-}
