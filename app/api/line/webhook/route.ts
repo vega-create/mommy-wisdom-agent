@@ -241,20 +241,66 @@ export async function POST(request: NextRequest) {
                 if (groupType === 'employee') {
                     const parsed = await parseMessage(text, groupType);
 
-                    if (parsed.intent === 'complete_task') {
-                        const { data: group } = await supabase
-                            .from('agent_groups')
-                            .select('employee_id')
-                            .eq('line_group_id', groupId)
-                            .single();
+                    // 取得員工資訊
+                    const { data: group } = await supabase
+                        .from('agent_groups')
+                        .select('employee_id')
+                        .eq('line_group_id', groupId)
+                        .single();
 
-                        if (group?.employee_id) {
-                            const result = await completeTask(group.employee_id, text);
-                            if (replyToken) {
-                                await replyMessage(replyToken, result.message);
-                            }
+                    if (!group?.employee_id) continue;
+
+                    // 取得員工名稱
+                    const { data: employee } = await supabase
+                        .from('agent_employees')
+                        .select('name')
+                        .eq('id', group.employee_id)
+                        .single();
+
+                    const employeeName = employee?.name || '';
+
+                    // 完成任務
+                    if (parsed.intent === 'complete_task') {
+                        const result = await completeTask(group.employee_id, text);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
                         }
+                        continue;
                     }
+
+                    // 新增任務（員工自己加）
+                    if (parsed.intent === 'add_task') {
+                        const result = await addTask(
+                            employeeName,
+                            parsed.task_name || '未命名任務',
+                            parsed.client_name || '',
+                            parsed.frequency || 'weekly',
+                            parsed.frequency_detail || ''
+                        );
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定提醒（提醒發到員工群）
+                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
+                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 查詢自己的任務
+                    if (parsed.intent === 'query_tasks') {
+                        const tasks = await getEmployeeTasks(group.employee_id);
+                        if (replyToken) {
+                            await replyMessage(replyToken, tasks);
+                        }
+                        continue;
+                    }
+
                     continue;
                 }
 
@@ -334,14 +380,14 @@ export async function POST(request: NextRequest) {
 
                     // 查詢任務
                     if (parsed.intent === 'query_tasks' && parsed.employee_name) {
-                        const { data: employee } = await supabase
+                        const { data: emp } = await supabase
                             .from('agent_employees')
                             .select('id')
                             .eq('name', parsed.employee_name)
                             .single();
 
-                        if (employee) {
-                            const tasks = await getEmployeeTasks(employee.id);
+                        if (emp) {
+                            const tasks = await getEmployeeTasks(emp.id);
                             if (replyToken) {
                                 await replyMessage(replyToken, tasks);
                             }
