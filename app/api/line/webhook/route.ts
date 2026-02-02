@@ -265,7 +265,7 @@ export async function POST(request: NextRequest) {
                     }
 
                     // 回報完成任務
-                    const completeTriggers = ['完成', '做好', '做完', '好了', 'OK', 'ok', '搞定'];
+                    const completeTriggers = ['完成', '做好', '做完了', '搞定'];
                     const isComplete = completeTriggers.some(w => text.includes(w));
                     if (isComplete) {
                         const { data: group } = await supabase
