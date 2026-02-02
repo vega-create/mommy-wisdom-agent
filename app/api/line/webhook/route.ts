@@ -1,465 +1,390 @@
 export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
-import { issueInvoice, invalidInvoice, EzPayConfig, InvoiceItem } from '@/lib/ezpay';
+import { supabase } from '@/lib/supabase';
+import {
+    parseMessage,
+    addTask,
+    completeTask,
+    getEmployeeTasks,
+    sendMessageToGroup,
+    cancelLastRecord,
+    deleteTask,
+    updateTask,
+    setReminder,
+    scheduleMeeting
+} from '@/lib/ai-parser';
 
+const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
+const BOSS_USER_ID = 'U9f60f88dca07d665c4ab000bc2d3f5f3';
 
-// 取得公司的 ezPay 設定
-async function getEzPayConfig(supabase: any, companyId: string): Promise<EzPayConfig | null> {
-  const { data, error } = await supabase
-    .from('acct_invoice_settings')
-    .select('*')
-    .eq('company_id', companyId)
-    .single();
+async function replyMessage(replyToken: string, text: string) {
+    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-  if (error || !data) {
-    console.error('Error fetching ezPay config:', error);
-    return null;
-  }
-
-  return {
-    merchantId: data.merchant_id,
-    hashKey: data.hash_key,
-    hashIV: data.hash_iv,
-    isProduction: data.is_production,
-  };
-}
-
-// 產生發票單號
-async function generateInvoiceNumber(supabase: any, companyId: string): Promise<string> {
-  const year = new Date().getFullYear();
-  const month = String(new Date().getMonth() + 1).padStart(2, '0');
-  const prefix = `INV${year}${month}`;
-
-  const { data } = await supabase
-    .from('acct_invoices')
-    .select('id')
-    .eq('company_id', companyId)
-    .like('invoice_number', `${prefix}%`)
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-  const nextNum = (data?.length || 0) + 1;
-  return `${prefix}${String(nextNum).padStart(4, '0')}`;
-}
-
-// GET - 取得發票列表
-export async function GET(request: NextRequest) {
-  try {
-    const supabase = await createClient();
-    const { searchParams } = new URL(request.url);
-    const companyId = searchParams.get('company_id');
-    const status = searchParams.get('status');
-    const billingId = searchParams.get('billing_id');
-    const startDate = searchParams.get('start_date');
-    const endDate = searchParams.get('end_date');
-
-    if (!companyId) {
-      return NextResponse.json({ error: '缺少 company_id' }, { status: 400 });
-    }
-
-    let query = supabase
-      .from('acct_invoices')
-      .select(`
-        *,
-        items:acct_invoice_items(*),
-        billing:acct_billing_requests(id, billing_number, status, paid_at),
-        customer:acct_customers(id, name, email, tax_id)
-      `)
-      .eq('company_id', companyId)
-      .order('created_at', { ascending: false });
-
-    if (status && status !== 'all') {
-      query = query.eq('status', status);
-    }
-
-    if (billingId) {
-      query = query.eq('billing_request_id', billingId);
-    }
-
-    if (startDate) {
-      query = query.gte('invoice_date', startDate);
-    }
-
-    if (endDate) {
-      query = query.lte('invoice_date', endDate);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('Invoices GET error:', error);
-      return NextResponse.json({ error: `取得發票失敗: ${error.message}` }, { status: 500 });
-    }
-
-    // 查詢關聯的交易記錄
-    const invoiceIds = (data || []).map(inv => inv.id);
-    let transactions: any[] = [];
-    
-    if (invoiceIds.length > 0) {
-      const { data: txData } = await supabase
-        .from('acct_transactions')
-        .select('id, invoice_id, amount, transaction_date, description')
-        .in('invoice_id', invoiceIds);
-      
-      transactions = txData || [];
-    }
-
-    // 合併交易資訊到發票
-    const enrichedData = (data || []).map(invoice => ({
-      ...invoice,
-      transaction: transactions.find(tx => tx.invoice_id === invoice.id) || null,
-    }));
-
-    return NextResponse.json({ data: enrichedData });
-  } catch (error) {
-    console.error('Error fetching invoices:', error);
-    return NextResponse.json({ error: '取得發票失敗' }, { status: 500 });
-  }
-}
-
-// POST - 開立發票
-export async function POST(request: NextRequest) {
-  try {
-    const supabase = await createClient();
-    const body = await request.json();
-    console.log('Invoice POST body:', body);
-
-    const {
-      company_id,
-      billing_request_id,
-      invoice_type,        // B2B, B2C
-      tax_type = 'taxable', // taxable, zero_rate, exempt
-      
-      // 買受人資訊
-      customer_id,
-      buyer_name,
-      buyer_tax_id,
-      buyer_email,
-      buyer_phone,
-      buyer_address,
-      
-      // 載具（B2C）
-      carrier_type,
-      carrier_num,
-      love_code,
-      
-      // 發票內容
-      items,
-      comment,
-      
-      // 是否實際開立 ezPay 發票
-      issue_to_ezpay = true,
-      
-      created_by,
-    } = body;
-
-    if (!company_id || !buyer_name || !items || items.length === 0) {
-      return NextResponse.json({ error: '缺少必要欄位' }, { status: 400 });
-    }
-
-    // 計算金額
-    const taxTypeCode = tax_type === 'taxable' ? '1' : tax_type === 'zero_rate' ? '2' : '3';
-    const taxRate = taxTypeCode === '1' ? 0.05 : 0;
-    
-    const totalAmount = items.reduce((sum: number, item: any) => {
-      return sum + (item.price * item.quantity);
-    }, 0);
-    
-    const salesAmount = Math.round(totalAmount / (1 + taxRate));
-    const taxAmount = totalAmount - salesAmount;
-
-    // 產生訂單編號
-    const orderNumber = `ORD${Date.now().toString(36).toUpperCase()}`;
-
-    let invoiceNumber = null;
-    let invoiceDate = new Date().toISOString().split('T')[0];
-    let randomNum = null;
-    let transNum = null;
-    let ezpayResponse = null;
-    let status = 'draft';
-
-    // 如果要開立 ezPay 發票
-    if (issue_to_ezpay) {
-      const config = await getEzPayConfig(supabase, company_id);
-      if (!config) {
-        return NextResponse.json({ error: '未設定 ezPay API，請先至設定頁面設定' }, { status: 400 });
-      }
-
-      // 轉換項目格式
-      const ezpayItems: InvoiceItem[] = items.map((item: any) => ({
-        name: item.name,
-        count: item.quantity,
-        unit: item.unit || '式',
-        price: item.price,
-        amount: item.price * item.quantity,
-        taxType: taxTypeCode,
-      }));
-
-      // 呼叫 ezPay API
-      const result = await issueInvoice(config, {
-        orderNumber,
-        invoiceType: invoice_type,
-        buyerName: buyer_name,
-        buyerTaxId: buyer_tax_id,
-        buyerEmail: buyer_email,
-        buyerPhone: buyer_phone,
-        buyerAddress: buyer_address,
-        carrierType: carrier_type,
-        carrierNum: carrier_num,
-        loveCode: love_code,
-        items: ezpayItems,
-        taxType: taxTypeCode,
-        comment,
-      });
-
-      if (!result.success) {
-        return NextResponse.json({ 
-          error: `ezPay 開立失敗: ${result.message}`,
-          rawResponse: result.rawResponse 
-        }, { status: 400 });
-      }
-
-      invoiceNumber = result.invoiceNumber;
-      invoiceDate = result.invoiceDate?.split(' ')[0] || invoiceDate;
-      randomNum = result.randomNum;
-      transNum = result.transNum;
-      ezpayResponse = result.rawResponse;
-      status = 'issued';
-    }
-
-    // 儲存到資料庫
-    const { data: invoice, error: insertError } = await supabase
-      .from('acct_invoices')
-      .insert({
-        company_id,
-        invoice_number: invoiceNumber,
-        invoice_date: invoiceDate,
-        customer_id,
-        buyer_name,
-        buyer_tax_id,
-        buyer_email,
-        buyer_phone,
-        buyer_address,
-        invoice_type,
-        tax_type,
-        sales_amount: salesAmount,
-        tax_amount: taxAmount,
-        total_amount: totalAmount,
-        status,
-        billing_request_id,
-        ezpay_trans_num: transNum,
-        ezpay_random_num: randomNum,
-        ezpay_response: ezpayResponse,
-        created_by,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('Invoice insert error:', insertError);
-      return NextResponse.json({ error: `儲存發票失敗: ${insertError.message}` }, { status: 500 });
-    }
-
-    // 儲存發票明細
-    const invoiceItems = items.map((item: any, index: number) => ({
-      invoice_id: invoice.id,
-      item_name: item.name,
-      quantity: item.quantity,
-      unit: item.unit || '式',
-      unit_price: item.price,
-      amount: item.price * item.quantity,
-      sort_order: index,
-    }));
-
-    const { error: itemsError } = await supabase
-      .from('acct_invoice_items')
-      .insert(invoiceItems);
-
-    if (itemsError) {
-      console.error('Invoice items insert error:', itemsError);
-    }
-
-    // 更新請款單的發票狀態
-    if (billing_request_id) {
-      await supabase
-        .from('acct_billing_requests')
-        .update({ 
-          invoice_id: invoice.id,
-          invoice_number: invoiceNumber,
-          invoice_status: status === 'issued' ? 'issued' : 'pending',
-        })
-        .eq('id', billing_request_id);
-    }
-
-    // 開票成功後發送 LINE 群組通知
-    if (status === 'issued') {
-      try {
-        const { data: lineSettings } = await supabase
-          .from('acct_line_settings')
-          .select('channel_access_token, admin_group_id')
-          .eq('company_id', company_id)
-          .eq('is_active', true)
-          .single();
-
-        if (lineSettings?.channel_access_token && lineSettings?.admin_group_id) {
-          const message = `📄 發票開立通知
-
-🧾 發票號碼：${invoiceNumber}
-👤 買受人：${buyer_name}${buyer_tax_id ? `\n🏢 統編：${buyer_tax_id}` : ''}
-💰 金額：NT$ ${totalAmount.toLocaleString()}
-📧 類型：${invoice_type}
-
-${buyer_email ? `✉️ 發票已自動寄送至 ${buyer_email}` : '⚠️ 未設定 Email，請手動通知客戶'}`;
-
-          await fetch('https://api.line.me/v2/bot/message/push', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${lineSettings.channel_access_token}`,
-            },
-            body: JSON.stringify({
-              to: lineSettings.admin_group_id,
-              messages: [{ type: 'text', text: message }],
-            }),
-          });
-        }
-      } catch (lineError) {
-        console.error('LINE notification error:', lineError);
-        // LINE 通知失敗不影響主流程
-      }
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      data: invoice,
-      message: status === 'issued' ? '發票開立成功' : '發票草稿已儲存',
+    await fetch(LINE_API_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+            replyToken,
+            messages: [{ type: 'text', text }]
+        }),
     });
-  } catch (error) {
-    console.error('Error creating invoice:', error);
-    return NextResponse.json({ 
-      error: `開立發票失敗: ${error instanceof Error ? error.message : '未知錯誤'}` 
-    }, { status: 500 });
-  }
 }
 
-// PUT - 作廢發票
-export async function PUT(request: NextRequest) {
-  try {
-    const supabase = await createClient();
-    const body = await request.json();
-    const { id, action, void_reason } = body;
+async function pushMessage(groupId: string, text: string) {
+    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-    if (!id) {
-      return NextResponse.json({ error: '缺少 id' }, { status: 400 });
-    }
+    await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+            to: groupId,
+            messages: [{ type: 'text', text }]
+        }),
+    });
+}
 
-    // 取得發票資料
-    const { data: invoice, error: fetchError } = await supabase
-      .from('acct_invoices')
-      .select('*')
-      .eq('id', id)
-      .single();
+async function getGroupName(groupId: string): Promise<string> {
+    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-    if (fetchError || !invoice) {
-      return NextResponse.json({ error: '找不到發票' }, { status: 404 });
-    }
+    try {
+        const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/summary`, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+            },
+        });
 
-    if (action === 'void') {
-      // 作廢發票
-      if (invoice.status !== 'issued') {
-        return NextResponse.json({ error: '只能作廢已開立的發票' }, { status: 400 });
-      }
-
-      if (!void_reason) {
-        return NextResponse.json({ error: '請填寫作廢原因' }, { status: 400 });
-      }
-
-      // 如果有 ezPay 發票號碼，呼叫作廢 API
-      if (invoice.invoice_number && invoice.ezpay_trans_num) {
-        const config = await getEzPayConfig(supabase, invoice.company_id);
-        if (config) {
-          const result = await invalidInvoice(config, {
-            invoiceNumber: invoice.invoice_number,
-            invalidReason: void_reason,
-          });
-
-          if (!result.success) {
-            return NextResponse.json({ 
-              error: `ezPay 作廢失敗: ${result.message}`,
-              rawResponse: result.rawResponse 
-            }, { status: 400 });
-          }
+        if (res.ok) {
+            const data = await res.json();
+            return data.groupName || '未命名群組';
         }
-      }
-
-      // 更新資料庫
-      const { error: updateError } = await supabase
-        .from('acct_invoices')
-        .update({
-          status: 'void',
-          void_at: new Date().toISOString(),
-          void_reason,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', id);
-
-      if (updateError) {
-        return NextResponse.json({ error: `更新失敗: ${updateError.message}` }, { status: 500 });
-      }
-
-      return NextResponse.json({ success: true, message: '發票已作廢' });
+    } catch (error) {
+        console.error('取得群組名稱失敗:', error);
     }
 
-    return NextResponse.json({ error: '不支援的操作' }, { status: 400 });
-  } catch (error) {
-    console.error('Error updating invoice:', error);
-    return NextResponse.json({ error: '操作失敗' }, { status: 500 });
-  }
+    return '未命名群組';
 }
 
-// DELETE - 刪除草稿發票
-export async function DELETE(request: NextRequest) {
-  try {
-    const supabase = await createClient();
-    const { searchParams } = new URL(request.url);
-    const id = searchParams.get('id');
+export async function POST(request: NextRequest) {
+    try {
+        const body = await request.json();
+        console.log('LINE Webhook received:', JSON.stringify(body, null, 2));
 
-    if (!id) {
-      return NextResponse.json({ error: '缺少 id' }, { status: 400 });
+        for (const event of body.events || []) {
+            const sourceType = event.source?.type;
+            const groupId = event.source?.groupId;
+            const userId = event.source?.userId;
+            const replyToken = event.replyToken;
+
+            // 機器人加入群組
+            if (event.type === 'join') {
+                if (groupId) {
+                    const groupName = await getGroupName(groupId);
+
+                    const { data: existing } = await supabase
+                        .from('agent_groups')
+                        .select('id')
+                        .eq('line_group_id', groupId)
+                        .single();
+
+                    if (!existing) {
+                        await supabase.from('agent_groups').insert({
+                            group_name: groupName,
+                            line_group_id: groupId,
+                            group_type: 'customer',
+                            is_active: true
+                        });
+                    }
+
+                    const { data: existingAcct } = await supabase
+                        .from('acct_line_groups')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .single();
+
+                    if (!existingAcct) {
+                        const { data: company } = await supabase
+                            .from('acct_companies')
+                            .select('id')
+                            .limit(1)
+                            .single();
+
+                        if (company) {
+                            await supabase.from('acct_line_groups').insert({
+                                company_id: company.id,
+                                group_id: groupId,
+                                group_name: groupName,
+                                group_type: 'group',
+                                is_active: true,
+                                description: `自動偵測於 ${new Date().toLocaleString('zh-TW')}`
+                            });
+                        }
+                    }
+
+                    if (replyToken) {
+                        await replyMessage(replyToken, `✅ 智慧媽咪 AI 助理已加入「${groupName}」！`);
+                    }
+                }
+                continue;
+            }
+
+            // 文字訊息處理
+            if (event.type === 'message' && event.message?.type === 'text') {
+                const text = event.message.text.trim();
+                const textLower = text.toLowerCase();
+
+                // 查詢 Group ID
+                if (textLower === '!groupid' || textLower === '/groupid' || textLower === 'groupid') {
+                    if (replyToken) {
+                        let reply = '';
+                        if (sourceType === 'group' && groupId) {
+                            reply = `📋 群組 ID:\n${groupId}`;
+                        } else if (sourceType === 'user' && userId) {
+                            reply = `📋 用戶 ID:\n${userId}`;
+                        } else {
+                            reply = '無法取得 ID';
+                        }
+                        await replyMessage(replyToken, reply);
+                    }
+                    continue;
+                }
+
+                // 取得群組資訊
+                let groupType = 'unknown';
+                let groupName = '';
+                if (groupId) {
+                    const { data: group } = await supabase
+                        .from('agent_groups')
+                        .select('group_type, group_name')
+                        .eq('line_group_id', groupId)
+                        .single();
+                    groupType = group?.group_type || 'unknown';
+                    groupName = group?.group_name || '';
+                }
+
+                // 客戶、合作夥伴、會計群組
+                if (['customer', 'partner', 'accounting'].includes(groupType)) {
+
+                    // 老闆的訊息：標記已回覆
+                    if (userId === BOSS_USER_ID) {
+                        await supabase.from('agent_customer_messages').insert({
+                            group_id: groupId,
+                            group_name: groupName,
+                            group_type: groupType,
+                            user_id: userId,
+                            message: '(已回覆)',
+                            is_replied: true
+                        });
+                        continue;
+                    }
+
+                    // 記錄訊息（前50字）
+                    await supabase.from('agent_customer_messages').insert({
+                        group_id: groupId,
+                        group_name: groupName,
+                        group_type: groupType,
+                        user_id: userId,
+                        message: text.length > 50 ? text.substring(0, 50) + '...' : text,
+                        is_replied: false
+                    });
+
+                    // 老闆 2 小時內有回覆過 → 不通知（正在對話中）
+                    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+                    const { data: recentBossReply } = await supabase
+                        .from('agent_customer_messages')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .eq('user_id', BOSS_USER_ID)
+                        .gte('created_at', twoHoursAgo)
+                        .limit(1);
+
+                    if (recentBossReply && recentBossReply.length > 0) {
+                        continue;
+                    }
+
+                    // 30 分鐘內是否已通知過
+                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+                    const { data: recentMessages } = await supabase
+                        .from('agent_customer_messages')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .neq('user_id', BOSS_USER_ID)
+                        .gte('created_at', thirtyMinutesAgo)
+                        .limit(2);
+
+                    // 30 分鐘內第一則訊息才通知
+                    if (!recentMessages || recentMessages.length <= 1) {
+                        const { data: managerGroup } = await supabase
+                            .from('agent_groups')
+                            .select('line_group_id')
+                            .eq('group_type', 'manager')
+                            .eq('is_active', true)
+                            .single();
+
+                        if (managerGroup) {
+                            const notifyText = `📩 ${groupName} 有新訊息`;
+                            await pushMessage(managerGroup.line_group_id, notifyText);
+                        }
+                    }
+                    continue;
+                }
+
+                // 公司群組不處理
+                if (groupType === 'company') {
+                    continue;
+                }
+
+                // 員工群組
+                if (groupType === 'employee') {
+                    const parsed = await parseMessage(text, groupType);
+
+                    // 取得員工資訊
+                    const { data: group } = await supabase
+                        .from('agent_groups')
+                        .select('employee_id')
+                        .eq('line_group_id', groupId)
+                        .single();
+
+                    if (!group?.employee_id) continue;
+
+                    // 完成任務
+                    if (parsed.intent === 'complete_task') {
+                        const result = await completeTask(group.employee_id, text);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定提醒（發到員工群）
+                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
+                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 查詢自己的任務
+                    if (parsed.intent === 'query_tasks') {
+                        const tasks = await getEmployeeTasks(group.employee_id);
+                        if (replyToken) {
+                            await replyMessage(replyToken, tasks);
+                        }
+                        continue;
+                    }
+
+                    continue;
+                }
+
+                // 主管群組
+                if (groupType === 'manager') {
+                    const parsed = await parseMessage(text, groupType);
+                    console.log('AI 解析結果:', parsed);
+
+                    // 發送訊息
+                    if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
+                        const result = await sendMessageToGroup(parsed.target_group, parsed.message_content);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 取消回報
+                    if (parsed.intent === 'cancel_record' && parsed.employee_name) {
+                        const result = await cancelLastRecord(parsed.employee_name);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 刪除任務
+                    if (parsed.intent === 'delete_task' && parsed.employee_name && parsed.task_name) {
+                        const result = await deleteTask(parsed.employee_name, parsed.task_name);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 修改任務
+                    if (parsed.intent === 'update_task' && parsed.employee_name && parsed.task_name && parsed.frequency_detail) {
+                        const result = await updateTask(parsed.employee_name, parsed.task_name, parsed.frequency_detail);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定提醒
+                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
+                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 設定線上會議
+                    if (parsed.intent === 'schedule_meeting' && parsed.target_group && parsed.meeting_date && parsed.reminder_time) {
+                        const result = await scheduleMeeting(parsed.target_group, parsed.meeting_date, parsed.reminder_time);
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 新增任務
+                    if (parsed.intent === 'add_task' && parsed.employee_name) {
+                        const result = await addTask(
+                            parsed.employee_name,
+                            parsed.task_name || '未命名任務',
+                            parsed.client_name || '',
+                            parsed.frequency || 'weekly',
+                            parsed.frequency_detail || ''
+                        );
+                        if (replyToken) {
+                            await replyMessage(replyToken, result.message);
+                        }
+                        continue;
+                    }
+
+                    // 查詢任務
+                    if (parsed.intent === 'query_tasks' && parsed.employee_name) {
+                        const { data: emp } = await supabase
+                            .from('agent_employees')
+                            .select('id')
+                            .eq('name', parsed.employee_name)
+                            .single();
+
+                        if (emp) {
+                            const tasks = await getEmployeeTasks(emp.id);
+                            if (replyToken) {
+                                await replyMessage(replyToken, tasks);
+                            }
+                        }
+                        continue;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        return NextResponse.json({ success: true });
+    } catch (error) {
+        console.error('Webhook error:', error);
+        return NextResponse.json({ error: 'Webhook 處理失敗' }, { status: 500 });
     }
+}
 
-    // 檢查是否為草稿
-    const { data: invoice } = await supabase
-      .from('acct_invoices')
-      .select('status')
-      .eq('id', id)
-      .single();
-
-    if (invoice?.status !== 'draft') {
-      return NextResponse.json({ error: '只能刪除草稿發票' }, { status: 400 });
-    }
-
-    // 刪除明細
-    await supabase
-      .from('acct_invoice_items')
-      .delete()
-      .eq('invoice_id', id);
-
-    // 刪除發票
-    const { error } = await supabase
-      .from('acct_invoices')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      return NextResponse.json({ error: `刪除失敗: ${error.message}` }, { status: 500 });
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error('Error deleting invoice:', error);
-    return NextResponse.json({ error: '刪除失敗' }, { status: 500 });
-  }
+export async function GET() {
+    return NextResponse.json({ status: 'AI Agent Webhook is ready' });
 }
