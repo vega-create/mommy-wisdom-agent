@@ -242,44 +242,48 @@ export async function POST(request: NextRequest) {
 
                 // 員工群組
                 if (groupType === 'employee') {
-                    const parsed = await parseMessage(text, groupType);
+                    // 老闆的訊息不處理
+                    if (userId === BOSS_USER_ID) {
+                        continue;
+                    }
 
-                    // 取得員工資訊
-                    const { data: group } = await supabase
-                        .from('agent_groups')
-                        .select('employee_id')
-                        .eq('line_group_id', groupId)
-                        .single();
+                    // 查詢今日任務（精確匹配）
+                    if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
+                        const { data: group } = await supabase
+                            .from('agent_groups')
+                            .select('employee_id')
+                            .eq('line_group_id', groupId)
+                            .single();
 
-                    if (!group?.employee_id) continue;
-
-                    // 完成任務
-                    if (parsed.intent === 'complete_task') {
-                        const result = await completeTask(group.employee_id, text);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
+                        if (group?.employee_id) {
+                            const tasks = await getEmployeeTasks(group.employee_id);
+                            if (replyToken) {
+                                await replyMessage(replyToken, tasks);
+                            }
                         }
                         continue;
                     }
 
-                    // 設定提醒（發到員工群）
-                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
-                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
+                    // 回報完成任務
+                    const completeTriggers = ['完成', '做好', '做完', '好了', 'OK', 'ok', '搞定'];
+                    const isComplete = completeTriggers.some(w => text.includes(w));
+                    if (isComplete) {
+                        const { data: group } = await supabase
+                            .from('agent_groups')
+                            .select('employee_id')
+                            .eq('line_group_id', groupId)
+                            .single();
+
+                        if (group?.employee_id) {
+                            const result = await completeTask(group.employee_id, text);
+                            if (replyToken) {
+                                await replyMessage(replyToken, result.message);
+                            }
                         }
                         continue;
                     }
 
-                    // 查詢自己的任務
-                    if (parsed.intent === 'query_tasks') {
-                        const tasks = await getEmployeeTasks(group.employee_id);
-                        if (replyToken) {
-                            await replyMessage(replyToken, tasks);
-                        }
-                        continue;
-                    }
-
+                    // 其他訊息不處理
                     continue;
                 }
 
