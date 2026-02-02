@@ -4,7 +4,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import {
     parseMessage,
-    parseCustomerMessage,
     addTask,
     completeTask,
     getEmployeeTasks,
@@ -171,62 +170,66 @@ export async function POST(request: NextRequest) {
 
                 // 客戶、合作夥伴、會計群組
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
-                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-                    // 老闆自己的訊息：不處理
+                    // 老闆的訊息：標記已回覆
                     if (userId === BOSS_USER_ID) {
-                        continue;
-                    }
-
-                    // 先解析訊息
-                    const parsed = await parseCustomerMessage(text);
-
-                    // 只有重要訊息才記錄和考慮通知
-                    if (parsed.type === 'urgent' || parsed.type === 'question' || parsed.type === 'payment') {
-                        // 記錄重要訊息（摘要）
                         await supabase.from('agent_customer_messages').insert({
                             group_id: groupId,
                             group_name: groupName,
                             group_type: groupType,
                             user_id: userId,
-                            message: parsed.summary,
-                            is_replied: false
+                            message: '(已回覆)',
+                            is_replied: true
                         });
+                        continue;
+                    }
 
-                        // 檢查 30 分鐘內老闆是否有回覆（代表已處理）
-                        const { data: bossReplied } = await supabase
-                            .from('agent_customer_messages')
-                            .select('id')
-                            .eq('group_id', groupId)
-                            .eq('user_id', BOSS_USER_ID)
-                            .gte('created_at', thirtyMinutesAgo)
-                            .limit(1);
+                    // 記錄訊息（前50字）
+                    await supabase.from('agent_customer_messages').insert({
+                        group_id: groupId,
+                        group_name: groupName,
+                        group_type: groupType,
+                        user_id: userId,
+                        message: text.length > 50 ? text.substring(0, 50) + '...' : text,
+                        is_replied: false
+                    });
 
-                        if (bossReplied && bossReplied.length > 0) {
-                            continue;
-                        }
+                    // 老闆 2 小時內有回覆過 → 不通知（正在對話中）
+                    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+                    const { data: recentBossReply } = await supabase
+                        .from('agent_customer_messages')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .eq('user_id', BOSS_USER_ID)
+                        .gte('created_at', twoHoursAgo)
+                        .limit(1);
 
-                        // 檢查 30 分鐘內是否已有其他重要訊息
-                        const { data: recentImportant } = await supabase
-                            .from('agent_customer_messages')
-                            .select('id')
-                            .eq('group_id', groupId)
-                            .neq('user_id', BOSS_USER_ID)
-                            .gte('created_at', thirtyMinutesAgo)
-                            .limit(2);
+                    if (recentBossReply && recentBossReply.length > 0) {
+                        continue;
+                    }
 
-                        // 30 分鐘內第一則重要訊息才通知
-                        if (!recentImportant || recentImportant.length <= 1) {
-                            const { data: managerGroup } = await supabase
-                                .from('agent_groups')
-                                .select('line_group_id')
-                                .eq('group_type', 'manager')
-                                .single();
+                    // 30 分鐘內是否已通知過
+                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+                    const { data: recentMessages } = await supabase
+                        .from('agent_customer_messages')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .neq('user_id', BOSS_USER_ID)
+                        .gte('created_at', thirtyMinutesAgo)
+                        .limit(2);
 
-                            if (managerGroup) {
-                                const notifyText = `📩 ${groupName} 有新訊息`;
-                                await pushMessage(managerGroup.line_group_id, notifyText);
-                            }
+                    // 30 分鐘內第一則訊息才通知
+                    if (!recentMessages || recentMessages.length <= 1) {
+                        const { data: managerGroup } = await supabase
+                            .from('agent_groups')
+                            .select('line_group_id')
+                            .eq('group_type', 'manager')
+                            .eq('is_active', true)
+                            .single();
+
+                        if (managerGroup) {
+                            const notifyText = `📩 ${groupName} 有新訊息`;
+                            await pushMessage(managerGroup.line_group_id, notifyText);
                         }
                     }
                     continue;
@@ -250,15 +253,6 @@ export async function POST(request: NextRequest) {
 
                     if (!group?.employee_id) continue;
 
-                    // 取得員工名稱
-                    const { data: employee } = await supabase
-                        .from('agent_employees')
-                        .select('name')
-                        .eq('id', group.employee_id)
-                        .single();
-
-                    const employeeName = employee?.name || '';
-
                     // 完成任務
                     if (parsed.intent === 'complete_task') {
                         const result = await completeTask(group.employee_id, text);
@@ -268,22 +262,7 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    // 新增任務（員工自己加）
-                    if (parsed.intent === 'add_task') {
-                        const result = await addTask(
-                            employeeName,
-                            parsed.task_name || '未命名任務',
-                            parsed.client_name || '',
-                            parsed.frequency || 'weekly',
-                            parsed.frequency_detail || ''
-                        );
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 設定提醒（提醒發到員工群）
+                    // 設定提醒（發到員工群）
                     if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
                         const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
                         if (replyToken) {
