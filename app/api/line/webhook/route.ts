@@ -247,7 +247,7 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    // 查詢今日任務（精確匹配）
+                    // 查詢今日任務
                     if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
                         const { data: group } = await supabase
                             .from('agent_groups')
@@ -291,6 +291,23 @@ export async function POST(request: NextRequest) {
                 if (groupType === 'manager') {
                     const parsed = await parseMessage(text, groupType);
                     console.log('AI 解析結果:', parsed);
+
+                    // 老闆回報完成自己的任務
+                    if (parsed.intent === 'complete_task' && !parsed.employee_name) {
+                        const { data: group } = await supabase
+                            .from('agent_groups')
+                            .select('employee_id')
+                            .eq('line_group_id', groupId)
+                            .single();
+
+                        if (group?.employee_id) {
+                            const result = await completeTask(group.employee_id, text);
+                            if (replyToken) {
+                                await replyMessage(replyToken, result.message);
+                            }
+                        }
+                        continue;
+                    }
 
                     // 發送訊息
                     if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
