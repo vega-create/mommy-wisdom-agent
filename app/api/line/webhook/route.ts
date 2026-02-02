@@ -184,6 +184,11 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // 過濾機器人訊息（沒有 userId 的是機器人）
+                    if (!userId) {
+                        continue;
+                    }
+
                     // 記錄訊息（前50字）
                     await supabase.from('agent_customer_messages').insert({
                         group_id: groupId,
