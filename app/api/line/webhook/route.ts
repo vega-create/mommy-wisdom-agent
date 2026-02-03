@@ -515,3 +515,4 @@ export async function POST(request: NextRequest) {
 export async function GET() {
     return NextResponse.json({ status: 'AI Agent Webhook is ready' });
 }
+
