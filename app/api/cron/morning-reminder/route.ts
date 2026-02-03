@@ -5,16 +5,17 @@ import { supabase } from '@/lib/supabase';
 
 export async function POST() {
     try {
-        // 用台灣時間計算今天星期幾
-        const nowUTC = new Date();
-        const taiwanOffset = 8 * 60 * 60 * 1000;
-        const nowTaiwan = new Date(nowUTC.getTime() + taiwanOffset);
-
-        const dayOfWeek = nowTaiwan.getDay(); // 0=日, 1=一, ..., 6=六
+        const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+        const dayOfWeek = now.getDay();
         const todayName = ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek];
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const todayStr = now.toLocaleDateString('sv-SE');
 
-        // 取得所有員工
+        // 計算昨天日期
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toLocaleDateString('sv-SE');
+
         const { data: employees } = await supabase
             .from('agent_employees')
             .select('id, name, line_group_id')
@@ -23,87 +24,70 @@ export async function POST() {
         if (!employees) return NextResponse.json({ success: true });
 
         for (const emp of employees) {
-            // 週末只提醒 Vega
             if (isWeekend && emp.name !== 'Vega') continue;
             if (!emp.line_group_id) continue;
 
-            // 取得該員工的任務
+            // 取得今日排程任務
             const { data: tasks } = await supabase
                 .from('agent_tasks')
-                .select('id, task_name, client_name, frequency, frequency_detail')
+                .select('id, task_name, client_name, frequency_detail')
                 .eq('employee_id', emp.id)
                 .eq('is_active', true);
 
-            if (!tasks || tasks.length === 0) continue;
-
-            // 篩選今天要做的任務
-            const todayDate = nowTaiwan.getDate();
-            const todayTasks = tasks.filter(task => {
+            const todayTasks = (tasks || []).filter(task => {
                 const detail = task.frequency_detail || '';
                 if (detail === '每天') return true;
                 if (detail === '不固定') return false;
-                // 週任務
-                if (detail.includes(todayName) || detail.includes('週' + todayName)) return true;
-                // 月任務（例如 "15號"、"17號"）
-                const dayMatch = detail.match(/(\d+)號/);
-                if (dayMatch && parseInt(dayMatch[1]) === todayDate) return true;
+                if (detail.includes(todayName)) return true;
                 return false;
             });
 
-            // 查昨天未完成的（用台灣時間）
-            const yesterdayTaiwan = new Date(nowTaiwan);
-            yesterdayTaiwan.setDate(yesterdayTaiwan.getDate() - 1);
-            // 轉回 UTC 查詢
-            const yesterdayStartUTC = new Date(yesterdayTaiwan.getFullYear(), yesterdayTaiwan.getMonth(), yesterdayTaiwan.getDate());
-            yesterdayStartUTC.setTime(yesterdayStartUTC.getTime() - taiwanOffset);
-            const yesterdayEndUTC = new Date(yesterdayStartUTC.getTime() + 24 * 60 * 60 * 1000);
-
-            const { data: completedYesterday } = await supabase
-                .from('agent_task_records')
-                .select('task_id')
+            // ⭐ 查昨天的 #今日待辦 有沒有未完成項目
+            const { data: yesterdayTodo } = await supabase
+                .from('agent_daily_todos')
+                .select('*')
                 .eq('employee_id', emp.id)
-                .gte('completed_at', yesterdayStartUTC.toISOString())
-                .lt('completed_at', yesterdayEndUTC.toISOString());
+                .eq('todo_date', yesterdayStr)
+                .single();
 
-            const completedIds = (completedYesterday || []).map(r => r.task_id);
-
-            // 昨天應該做但沒完成的
-            const yesterdayName = ['日', '一', '二', '三', '四', '五', '六'][yesterdayTaiwan.getDay()];
-            const yesterdayDate = yesterdayTaiwan.getDate();
-            const unfinishedTasks = tasks.filter(task => {
-                const detail = task.frequency_detail || '';
-                if (detail === '不固定') return false;
-                let shouldDo = false;
-                if (detail === '每天') shouldDo = true;
-                if (detail.includes(yesterdayName) || detail.includes('週' + yesterdayName)) shouldDo = true;
-                const dayMatch = detail.match(/(\d+)號/);
-                if (dayMatch && parseInt(dayMatch[1]) === yesterdayDate) shouldDo = true;
-                return shouldDo && !completedIds.includes(task.id);
-            });
+            let carryOverItems: string[] = [];
+            if (yesterdayTodo) {
+                const items = typeof yesterdayTodo.items === 'string'
+                    ? JSON.parse(yesterdayTodo.items)
+                    : yesterdayTodo.items;
+                carryOverItems = items
+                    .filter((i: any) => !i.done)
+                    .map((i: any) => i.text);
+            }
 
             // 組合訊息
-            let message = `📋 ${emp.name} 早安！\n\n`;
+            let message = `☀️ 早安 ${emp.name}！\n\n`;
 
-            if (unfinishedTasks.length > 0) {
-                message += `⚠️ 昨天未完成：\n`;
-                unfinishedTasks.forEach(t => {
-                    message += `• ${t.client_name ? t.client_name + ' - ' : ''}${t.task_name}\n`;
+            // 昨日未完成
+            if (carryOverItems.length > 0) {
+                message += `⚠️ 昨日未完成（${carryOverItems.length} 項）：\n`;
+                carryOverItems.forEach(item => {
+                    message += `🔴 ${item}\n`;
                 });
-                message += '\n';
+                message += `\n`;
             }
 
+            // 今日排程任務
             if (todayTasks.length > 0) {
-                message += `📌 今天要做：\n`;
+                message += `📋 今日排程任務（${todayTasks.length} 項）：\n`;
                 todayTasks.forEach(t => {
-                    message += `• ${t.client_name ? t.client_name + ' - ' : ''}${t.task_name}\n`;
+                    const client = t.client_name ? `[${t.client_name}] ` : '';
+                    message += `⬜ ${client}${t.task_name}\n`;
                 });
             }
 
-            if (unfinishedTasks.length === 0 && todayTasks.length === 0) {
-                continue;
+            // 都沒有就不發
+            if (carryOverItems.length === 0 && todayTasks.length === 0) continue;
+
+            if (carryOverItems.length > 0) {
+                message += `\n記得先補完昨天的再做今天的💪`;
             }
 
-            // 發送 LINE 訊息
             await fetch('https://api.line.me/v2/bot/message/push', {
                 method: 'POST',
                 headers: {
