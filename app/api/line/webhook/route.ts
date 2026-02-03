@@ -1,518 +1,113 @@
 export const dynamic = 'force-dynamic';
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import {
-    parseMessage,
-    addTask,
-    completeTask,
-    getEmployeeTasks,
-    sendMessageToGroup,
-    cancelLastRecord,
-    deleteTask,
-    updateTask,
-    setReminder,
-    scheduleMeeting
-} from '@/lib/ai-parser';
 
-const LINE_API_URL = 'https://api.line.me/v2/bot/message/reply';
-const BOSS_USER_ID = 'U9f60f88dca07d665c4ab000bc2d3f5f3';
-
-async function replyMessage(replyToken: string, text: string) {
-    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-    await fetch(LINE_API_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-            replyToken,
-            messages: [{ type: 'text', text }]
-        }),
-    });
-}
-
-async function pushMessage(groupId: string, text: string) {
-    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-    await fetch('https://api.line.me/v2/bot/message/push', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-            to: groupId,
-            messages: [{ type: 'text', text }]
-        }),
-    });
-}
-
-async function getGroupName(groupId: string): Promise<string> {
-    const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
+export async function POST() {
     try {
-        const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/summary`, {
-            headers: {
-                'Authorization': `Bearer ${accessToken}`,
-            },
-        });
+        const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+        const dayOfWeek = now.getDay();
+        const todayName = ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek];
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const todayStr = now.toLocaleDateString('sv-SE');
 
-        if (res.ok) {
-            const data = await res.json();
-            return data.groupName || '未命名群組';
-        }
-    } catch (error) {
-        console.error('取得群組名稱失敗:', error);
-    }
+        // 計算昨天日期
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toLocaleDateString('sv-SE');
 
-    return '未命名群組';
-}
+        const { data: employees } = await supabase
+            .from('agent_employees')
+            .select('id, name, line_group_id')
+            .eq('is_active', true);
 
-export async function POST(request: NextRequest) {
-    try {
-        const body = await request.json();
-        console.log('LINE Webhook received:', JSON.stringify(body, null, 2));
+        if (!employees) return NextResponse.json({ success: true });
 
-        for (const event of body.events || []) {
-            const sourceType = event.source?.type;
-            const groupId = event.source?.groupId;
-            const userId = event.source?.userId;
-            const replyToken = event.replyToken;
+        for (const emp of employees) {
+            if (isWeekend && emp.name !== 'Vega') continue;
+            if (!emp.line_group_id) continue;
 
-            // 機器人加入群組
-            if (event.type === 'join') {
-                if (groupId) {
-                    const groupName = await getGroupName(groupId);
+            // 取得今日排程任務
+            const { data: tasks } = await supabase
+                .from('agent_tasks')
+                .select('id, task_name, client_name, frequency_detail')
+                .eq('employee_id', emp.id)
+                .eq('is_active', true);
 
-                    const { data: existing } = await supabase
-                        .from('agent_groups')
-                        .select('id')
-                        .eq('line_group_id', groupId)
-                        .single();
+            const todayTasks = (tasks || []).filter(task => {
+                const detail = task.frequency_detail || '';
+                if (detail === '每天') return true;
+                if (detail === '不固定') return false;
+                if (detail.includes(todayName)) return true;
+                return false;
+            });
 
-                    if (!existing) {
-                        await supabase.from('agent_groups').insert({
-                            group_name: groupName,
-                            line_group_id: groupId,
-                            group_type: 'customer',
-                            is_active: true
-                        });
-                    }
+            // ⭐ 查昨天的 #今日待辦 有沒有未完成項目
+            const { data: yesterdayTodo } = await supabase
+                .from('agent_daily_todos')
+                .select('*')
+                .eq('employee_id', emp.id)
+                .eq('todo_date', yesterdayStr)
+                .single();
 
-                    const { data: existingAcct } = await supabase
-                        .from('acct_line_groups')
-                        .select('id')
-                        .eq('group_id', groupId)
-                        .single();
-
-                    if (!existingAcct) {
-                        const { data: company } = await supabase
-                            .from('acct_companies')
-                            .select('id')
-                            .limit(1)
-                            .single();
-
-                        if (company) {
-                            await supabase.from('acct_line_groups').insert({
-                                company_id: company.id,
-                                group_id: groupId,
-                                group_name: groupName,
-                                group_type: 'group',
-                                is_active: true,
-                                description: `自動偵測於 ${new Date().toLocaleString('zh-TW')}`
-                            });
-                        }
-                    }
-
-                    if (replyToken) {
-                        await replyMessage(replyToken, `✅ 智慧媽咪 AI 助理已加入「${groupName}」！`);
-                    }
-                }
-                continue;
+            let carryOverItems: string[] = [];
+            if (yesterdayTodo) {
+                const items = typeof yesterdayTodo.items === 'string'
+                    ? JSON.parse(yesterdayTodo.items)
+                    : yesterdayTodo.items;
+                carryOverItems = items
+                    .filter((i: any) => !i.done)
+                    .map((i: any) => i.text);
             }
 
-            // 文字訊息處理
-            if (event.type === 'message' && event.message?.type === 'text') {
-                const text = event.message.text.trim();
-                const textLower = text.toLowerCase();
+            // 組合訊息
+            let message = `☀️ 早安 ${emp.name}！\n\n`;
 
-                // 查詢 Group ID
-                if (textLower === '!groupid' || textLower === '/groupid' || textLower === 'groupid') {
-                    if (replyToken) {
-                        let reply = '';
-                        if (sourceType === 'group' && groupId) {
-                            reply = `📋 群組 ID:\n${groupId}`;
-                        } else if (sourceType === 'user' && userId) {
-                            reply = `📋 用戶 ID:\n${userId}`;
-                        } else {
-                            reply = '無法取得 ID';
-                        }
-                        await replyMessage(replyToken, reply);
-                    }
-                    continue;
-                }
-
-                // 取得群組資訊
-                let groupType = 'unknown';
-                let groupName = '';
-                if (groupId) {
-                    const { data: group } = await supabase
-                        .from('agent_groups')
-                        .select('group_type, group_name')
-                        .eq('line_group_id', groupId)
-                        .single();
-                    groupType = group?.group_type || 'unknown';
-                    groupName = group?.group_name || '';
-                }
-
-                // 客戶、合作夥伴、會計群組
-                if (['customer', 'partner', 'accounting'].includes(groupType)) {
-
-                    // 老闆的訊息：標記該群組已回覆
-                    if (userId === BOSS_USER_ID) {
-                        await supabase.from('agent_customer_messages').insert({
-                            group_id: groupId,
-                            group_name: groupName,
-                            group_type: groupType,
-                            user_id: userId,
-                            message: '(已回覆)',
-                            is_replied: true
-                        });
-
-                        // ⭐ 把該群組所有舊的未回覆訊息都標記為已回覆
-                        await supabase
-                            .from('agent_customer_messages')
-                            .update({ is_replied: true })
-                            .eq('group_id', groupId)
-                            .eq('is_replied', false);
-
-                        continue;
-                    }
-
-                    // 過濾機器人訊息（沒有 userId 的是機器人）
-                    if (!userId) {
-                        continue;
-                    }
-
-                    // 記錄訊息（前50字）
-                    await supabase.from('agent_customer_messages').insert({
-                        group_id: groupId,
-                        group_name: groupName,
-                        group_type: groupType,
-                        user_id: userId,
-                        message: text.length > 50 ? text.substring(0, 50) + '...' : text,
-                        is_replied: false
-                    });
-
-                    // 老闆 2 小時內有回覆過 → 不通知（正在對話中）
-                    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-                    const { data: recentBossReply } = await supabase
-                        .from('agent_customer_messages')
-                        .select('id')
-                        .eq('group_id', groupId)
-                        .eq('user_id', BOSS_USER_ID)
-                        .gte('created_at', twoHoursAgo)
-                        .limit(1);
-
-                    if (recentBossReply && recentBossReply.length > 0) {
-                        continue;
-                    }
-
-                    // 30 分鐘內是否已通知過
-                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-                    const { data: recentMessages } = await supabase
-                        .from('agent_customer_messages')
-                        .select('id')
-                        .eq('group_id', groupId)
-                        .neq('user_id', BOSS_USER_ID)
-                        .gte('created_at', thirtyMinutesAgo)
-                        .limit(2);
-
-                    // 30 分鐘內第一則訊息才通知
-                    if (!recentMessages || recentMessages.length <= 1) {
-                        const { data: managerGroup } = await supabase
-                            .from('agent_groups')
-                            .select('line_group_id')
-                            .eq('group_type', 'manager')
-                            .eq('is_active', true)
-                            .single();
-
-                        if (managerGroup) {
-                            const notifyText = `📩 ${groupName} 有新訊息`;
-                            await pushMessage(managerGroup.line_group_id, notifyText);
-                        }
-                    }
-                    continue;
-                }
-
-                // 公司群組不處理
-                if (groupType === 'company') {
-                    continue;
-                }
-
-                // 員工群組
-                if (groupType === 'employee') {
-                    // 老闆的訊息不處理
-                    if (userId === BOSS_USER_ID) {
-                        continue;
-                    }
-
-                    // ⭐ 偵測 #今日待辦（只認第一行是 #今日待辦）
-                    const firstLine = text.trim().split('\n')[0].trim();
-                    const isTodoList = firstLine === '#今日待辦';
-
-                    if (isTodoList) {
-                        const lines = text.split('\n').slice(1).filter((l: string) => /^\d+[\.\、\)]/.test(l.trim()));
-                        const items = lines.map((line, i) => {
-                            const cleanLine = line.replace(/^\d+[\.\、\)]\s*/, '').trim();
-                            const isDone = /[V✓✅☑️v]/.test(cleanLine);
-                            const itemText = cleanLine.replace(/\s*[V✓✅☑️v]\s*$/, '').trim();
-                            return { index: i + 1, text: itemText, done: isDone };
-                        });
-
-                        if (items.length > 0) {
-                            const totalCount = items.length;
-                            const doneCount = items.filter(i => i.done).length;
-                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
-
-                            const { data: group } = await supabase
-                                .from('agent_groups')
-                                .select('employee_id')
-                                .eq('line_group_id', groupId)
-                                .single();
-
-                            const { data: employee } = await supabase
-                                .from('agent_employees')
-                                .select('name')
-                                .eq('id', group?.employee_id)
-                                .single();
-
-                            // 今天已有記錄就更新，沒有就新增
-                            const { data: existing } = await supabase
-                                .from('agent_daily_todos')
-                                .select('id')
-                                .eq('employee_id', group?.employee_id)
-                                .eq('todo_date', todayDate)
-                                .single();
-
-                            if (existing) {
-                                await supabase
-                                    .from('agent_daily_todos')
-                                    .update({
-                                        items: JSON.stringify(items),
-                                        total_count: totalCount,
-                                        done_count: doneCount,
-                                        raw_text: text,
-                                        updated_at: new Date().toISOString()
-                                    })
-                                    .eq('id', existing.id);
-                            } else {
-                                await supabase
-                                    .from('agent_daily_todos')
-                                    .insert({
-                                        employee_id: group?.employee_id,
-                                        employee_name: employee?.name || '',
-                                        group_id: groupId,
-                                        todo_date: todayDate,
-                                        items: JSON.stringify(items),
-                                        total_count: totalCount,
-                                        done_count: doneCount,
-                                        raw_text: text
-                                    });
-                            }
-
-                            // 回覆確認
-                            const percent = Math.round((doneCount / totalCount) * 100);
-                            let statusEmoji = '📋';
-                            if (percent === 100) statusEmoji = '🎉';
-                            else if (percent >= 50) statusEmoji = '💪';
-
-                            let replyText = `${statusEmoji} 已記錄今日 ${totalCount} 項待辦`;
-                            if (doneCount > 0) {
-                                replyText += `，已完成 ${doneCount} 項 (${percent}%)`;
-                            }
-                            replyText += '\n\n';
-
-                            items.forEach(item => {
-                                replyText += item.done ? `✅ ${item.text}\n` : `⬜ ${item.text}\n`;
-                            });
-
-                            if (doneCount === totalCount && totalCount > 0) {
-                                replyText += '\n🎉 全部完成，辛苦了！';
-                            } else {
-                                replyText += `\n還剩 ${totalCount - doneCount} 項加油💪`;
-                            }
-
-                            if (replyToken) {
-                                await replyMessage(replyToken, replyText.trim());
-                            }
-                        }
-                        continue;
-                    }
-
-                    // 查詢今日任務
-                    if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
-                        const { data: group } = await supabase
-                            .from('agent_groups')
-                            .select('employee_id')
-                            .eq('line_group_id', groupId)
-                            .single();
-
-                        if (group?.employee_id) {
-                            const tasks = await getEmployeeTasks(group.employee_id);
-                            if (replyToken) {
-                                await replyMessage(replyToken, tasks);
-                            }
-                        }
-                        continue;
-                    }
-
-                    // 回報完成任務
-                    const completeTriggers = ['完成', '做好了', '做完了', '搞定'];
-                    const isComplete = completeTriggers.some(w => text.includes(w));
-                    if (isComplete) {
-                        const { data: group } = await supabase
-                            .from('agent_groups')
-                            .select('employee_id')
-                            .eq('line_group_id', groupId)
-                            .single();
-
-                        if (group?.employee_id) {
-                            const result = await completeTask(group.employee_id, text);
-                            if (replyToken) {
-                                await replyMessage(replyToken, result.message);
-                            }
-                        }
-                        continue;
-                    }
-
-                    // 其他訊息不處理
-                    continue;
-                }
-
-                // 主管群組
-                if (groupType === 'manager') {
-                    const parsed = await parseMessage(text, groupType);
-                    console.log('AI 解析結果:', parsed);
-
-                    // 老闆回報完成自己的任務
-                    if (parsed.intent === 'complete_task' && !parsed.employee_name) {
-                        const { data: group } = await supabase
-                            .from('agent_groups')
-                            .select('employee_id')
-                            .eq('line_group_id', groupId)
-                            .single();
-
-                        if (group?.employee_id) {
-                            const result = await completeTask(group.employee_id, text);
-                            if (replyToken) {
-                                await replyMessage(replyToken, result.message);
-                            }
-                        }
-                        continue;
-                    }
-
-                    // 發送訊息
-                    if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
-                        const result = await sendMessageToGroup(parsed.target_group, parsed.message_content);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 取消回報
-                    if (parsed.intent === 'cancel_record' && parsed.employee_name) {
-                        const result = await cancelLastRecord(parsed.employee_name);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 刪除任務
-                    if (parsed.intent === 'delete_task' && parsed.employee_name && parsed.task_name) {
-                        const result = await deleteTask(parsed.employee_name, parsed.task_name);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 修改任務
-                    if (parsed.intent === 'update_task' && parsed.employee_name && parsed.task_name && parsed.frequency_detail) {
-                        const result = await updateTask(parsed.employee_name, parsed.task_name, parsed.frequency_detail);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 設定提醒
-                    if (parsed.intent === 'set_reminder' && parsed.reminder_time && parsed.reminder_content) {
-                        const result = await setReminder(parsed.reminder_time, parsed.reminder_content, groupId);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 設定線上會議
-                    if (parsed.intent === 'schedule_meeting' && parsed.target_group && parsed.meeting_date && parsed.reminder_time) {
-                        const result = await scheduleMeeting(parsed.target_group, parsed.meeting_date, parsed.reminder_time);
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 新增任務
-                    if (parsed.intent === 'add_task' && parsed.employee_name) {
-                        const result = await addTask(
-                            parsed.employee_name,
-                            parsed.task_name || '未命名任務',
-                            parsed.client_name || '',
-                            parsed.frequency || 'weekly',
-                            parsed.frequency_detail || ''
-                        );
-                        if (replyToken) {
-                            await replyMessage(replyToken, result.message);
-                        }
-                        continue;
-                    }
-
-                    // 查詢任務
-                    if (parsed.intent === 'query_tasks' && parsed.employee_name) {
-                        const { data: emp } = await supabase
-                            .from('agent_employees')
-                            .select('id')
-                            .eq('name', parsed.employee_name)
-                            .single();
-
-                        if (emp) {
-                            const tasks = await getEmployeeTasks(emp.id);
-                            if (replyToken) {
-                                await replyMessage(replyToken, tasks);
-                            }
-                        }
-                        continue;
-                    }
-                    continue;
-                }
+            // 昨日未完成
+            if (carryOverItems.length > 0) {
+                message += `⚠️ 昨日未完成（${carryOverItems.length} 項）：\n`;
+                carryOverItems.forEach(item => {
+                    message += `🔴 ${item}\n`;
+                });
+                message += `\n`;
             }
+
+            // 今日排程任務
+            if (todayTasks.length > 0) {
+                message += `📋 今日排程任務（${todayTasks.length} 項）：\n`;
+                todayTasks.forEach(t => {
+                    const client = t.client_name ? `[${t.client_name}] ` : '';
+                    message += `⬜ ${client}${t.task_name}\n`;
+                });
+            }
+
+            // 都沒有就不發
+            if (carryOverItems.length === 0 && todayTasks.length === 0) continue;
+
+            if (carryOverItems.length > 0) {
+                message += `\n記得先補完昨天的再做今天的💪`;
+            }
+
+            await fetch('https://api.line.me/v2/bot/message/push', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+                },
+                body: JSON.stringify({
+                    to: emp.line_group_id,
+                    messages: [{ type: 'text', text: message.trim() }],
+                }),
+            });
         }
 
         return NextResponse.json({ success: true });
     } catch (error) {
-        console.error('Webhook error:', error);
-        return NextResponse.json({ error: 'Webhook 處理失敗' }, { status: 500 });
+        console.error('Morning reminder error:', error);
+        return NextResponse.json({ error: 'Failed' }, { status: 500 });
     }
 }
 
 export async function GET() {
-    return NextResponse.json({ status: 'AI Agent Webhook is ready' });
+    return POST();
 }
-
