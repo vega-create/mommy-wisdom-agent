@@ -171,7 +171,7 @@ export async function POST(request: NextRequest) {
                 // 客戶、合作夥伴、會計群組
                 if (['customer', 'partner', 'accounting'].includes(groupType)) {
 
-                    // 老闆的訊息：標記已回覆
+                    // 老闆的訊息：標記該群組已回覆
                     if (userId === BOSS_USER_ID) {
                         await supabase.from('agent_customer_messages').insert({
                             group_id: groupId,
@@ -181,6 +181,14 @@ export async function POST(request: NextRequest) {
                             message: '(已回覆)',
                             is_replied: true
                         });
+
+                        // ⭐ 把該群組所有舊的未回覆訊息都標記為已回覆
+                        await supabase
+                            .from('agent_customer_messages')
+                            .update({ is_replied: true })
+                            .eq('group_id', groupId)
+                            .eq('is_replied', false);
+
                         continue;
                     }
 
