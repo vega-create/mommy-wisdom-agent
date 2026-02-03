@@ -260,6 +260,99 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // ⭐ 偵測 #今日待辦（只認第一行是 #今日待辦）
+                    const firstLine = text.trim().split('\n')[0].trim();
+                    const isTodoList = firstLine === '#今日待辦';
+
+                    if (isTodoList) {
+                        const lines = text.split('\n').slice(1).filter(l => /^\d+[\.\、\)]/.test(l.trim()));
+                        const items = lines.map((line, i) => {
+                            const cleanLine = line.replace(/^\d+[\.\、\)]\s*/, '').trim();
+                            const isDone = /[V✓✅☑️v]/.test(cleanLine);
+                            const itemText = cleanLine.replace(/\s*[V✓✅☑️v]\s*$/, '').trim();
+                            return { index: i + 1, text: itemText, done: isDone };
+                        });
+
+                        if (items.length > 0) {
+                            const totalCount = items.length;
+                            const doneCount = items.filter(i => i.done).length;
+                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                            const { data: group } = await supabase
+                                .from('agent_groups')
+                                .select('employee_id')
+                                .eq('line_group_id', groupId)
+                                .single();
+
+                            const { data: employee } = await supabase
+                                .from('agent_employees')
+                                .select('name')
+                                .eq('id', group?.employee_id)
+                                .single();
+
+                            // 今天已有記錄就更新，沒有就新增
+                            const { data: existing } = await supabase
+                                .from('agent_daily_todos')
+                                .select('id')
+                                .eq('employee_id', group?.employee_id)
+                                .eq('todo_date', todayDate)
+                                .single();
+
+                            if (existing) {
+                                await supabase
+                                    .from('agent_daily_todos')
+                                    .update({
+                                        items: JSON.stringify(items),
+                                        total_count: totalCount,
+                                        done_count: doneCount,
+                                        raw_text: text,
+                                        updated_at: new Date().toISOString()
+                                    })
+                                    .eq('id', existing.id);
+                            } else {
+                                await supabase
+                                    .from('agent_daily_todos')
+                                    .insert({
+                                        employee_id: group?.employee_id,
+                                        employee_name: employee?.name || '',
+                                        group_id: groupId,
+                                        todo_date: todayDate,
+                                        items: JSON.stringify(items),
+                                        total_count: totalCount,
+                                        done_count: doneCount,
+                                        raw_text: text
+                                    });
+                            }
+
+                            // 回覆確認
+                            const percent = Math.round((doneCount / totalCount) * 100);
+                            let statusEmoji = '📋';
+                            if (percent === 100) statusEmoji = '🎉';
+                            else if (percent >= 50) statusEmoji = '💪';
+
+                            let replyText = `${statusEmoji} 已記錄今日 ${totalCount} 項待辦`;
+                            if (doneCount > 0) {
+                                replyText += `，已完成 ${doneCount} 項 (${percent}%)`;
+                            }
+                            replyText += '\n\n';
+
+                            items.forEach(item => {
+                                replyText += item.done ? `✅ ${item.text}\n` : `⬜ ${item.text}\n`;
+                            });
+
+                            if (doneCount === totalCount && totalCount > 0) {
+                                replyText += '\n🎉 全部完成，辛苦了！';
+                            } else {
+                                replyText += `\n還剩 ${totalCount - doneCount} 項加油💪`;
+                            }
+
+                            if (replyToken) {
+                                await replyMessage(replyToken, replyText.trim());
+                            }
+                        }
+                        continue;
+                    }
+
                     // 查詢今日任務
                     if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
                         const { data: group } = await supabase
@@ -278,7 +371,7 @@ export async function POST(request: NextRequest) {
                     }
 
                     // 回報完成任務
-                    const completeTriggers = ['完成', '做好', '做完了', '搞定'];
+                    const completeTriggers = ['完成', '做好了', '做完了', '搞定'];
                     const isComplete = completeTriggers.some(w => text.includes(w));
                     if (isComplete) {
                         const { data: group } = await supabase
