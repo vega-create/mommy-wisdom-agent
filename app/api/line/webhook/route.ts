@@ -265,7 +265,7 @@ export async function POST(request: NextRequest) {
                     const isTodoList = firstLine === '#今日待辦';
 
                     if (isTodoList) {
-                        const lines = text.split('\n').slice(1).filter(l => /^\d+[\.\、\)]/.test(l.trim()));
+                        const lines = text.split('\n').slice(1).filter((l: string) => /^\d+[\.\、\)]/.test(l.trim()));
                         const items = lines.map((line, i) => {
                             const cleanLine = line.replace(/^\d+[\.\、\)]\s*/, '').trim();
                             const isDone = /[V✓✅☑️v]/.test(cleanLine);
