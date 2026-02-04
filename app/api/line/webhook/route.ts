@@ -188,7 +188,7 @@ export async function POST(request: NextRequest) {
                             is_replied: true
                         });
 
-                        // ⭐ 把該群組所有舊的未回覆訊息都標記為已回覆
+                        // 把該群組所有舊的未回覆訊息都標記為已回覆
                         await supabase
                             .from('agent_customer_messages')
                             .update({ is_replied: true })
@@ -357,7 +357,55 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    // 查詢今日任務
+                    // ⭐ 查詢今日待辦進度
+                    if (text.trim() === '#查進度') {
+                        const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                        const { data: group } = await supabase
+                            .from('agent_groups')
+                            .select('employee_id')
+                            .eq('line_group_id', groupId)
+                            .single();
+
+                        const { data: customTodo } = await supabase
+                            .from('agent_daily_todos')
+                            .select('*')
+                            .eq('employee_id', group?.employee_id)
+                            .eq('todo_date', todayDate)
+                            .single();
+
+                        if (customTodo) {
+                            const items = typeof customTodo.items === 'string'
+                                ? JSON.parse(customTodo.items)
+                                : customTodo.items;
+                            const done = items.filter((i: any) => i.done).length;
+                            const total = items.length;
+                            const percent = Math.round((done / total) * 100);
+                            const undone = items.filter((i: any) => !i.done);
+
+                            let progressText = `📊 今日進度：${done}/${total} (${percent}%)\n\n`;
+
+                            if (undone.length > 0) {
+                                progressText += `未完成：\n`;
+                                undone.forEach((item: any) => {
+                                    progressText += `⬜ ${item.text}\n`;
+                                });
+                            } else {
+                                progressText += `🎉 全部完成！`;
+                            }
+
+                            if (replyToken) {
+                                await replyMessage(replyToken, progressText.trim());
+                            }
+                        } else {
+                            if (replyToken) {
+                                await replyMessage(replyToken, '📋 今天還沒有 po 待辦清單喔！\n\n用 #今日待辦 開頭來記錄');
+                            }
+                        }
+                        continue;
+                    }
+
+                    // 查詢今日排程任務
                     if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
                         const { data: group } = await supabase
                             .from('agent_groups')
@@ -374,7 +422,7 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    // 回報完成任務
+                    // ⭐ 回報完成任務（優先用自訂待辦）
                     const completeTriggers: string[] = ['完成', '做好了', '做完了', '搞定'];
                     const isComplete = completeTriggers.some((w: string) => text.includes(w));
                     if (isComplete) {
@@ -385,9 +433,76 @@ export async function POST(request: NextRequest) {
                             .single();
 
                         if (group?.employee_id) {
-                            const result = await completeTask(group.employee_id, text);
-                            if (replyToken) {
-                                await replyMessage(replyToken, result.message);
+                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                            // 先查今天有沒有自訂待辦
+                            const { data: customTodo } = await supabase
+                                .from('agent_daily_todos')
+                                .select('*')
+                                .eq('employee_id', group.employee_id)
+                                .eq('todo_date', todayDate)
+                                .single();
+
+                            if (customTodo) {
+                                // 用自訂待辦清單
+                                const items = typeof customTodo.items === 'string'
+                                    ? JSON.parse(customTodo.items)
+                                    : customTodo.items;
+
+                                // 找最匹配的未完成項目
+                                let matchedIndex = -1;
+                                let bestScore = 0;
+                                items.forEach((item: any, idx: number) => {
+                                    if (item.done) return;
+                                    const keywords: string[] = item.text.replace(/[\[\]]/g, '').split(/[\s\/、，,]+/);
+                                    const score = keywords.filter((kw: string) => kw.length > 1 && text.includes(kw)).length;
+                                    if (score > bestScore) {
+                                        bestScore = score;
+                                        matchedIndex = idx;
+                                    }
+                                });
+
+                                if (matchedIndex >= 0) {
+                                    items[matchedIndex].done = true;
+                                    const doneCount = items.filter((i: any) => i.done).length;
+                                    const totalCount = items.length;
+                                    const percent = Math.round((doneCount / totalCount) * 100);
+
+                                    await supabase
+                                        .from('agent_daily_todos')
+                                        .update({
+                                            items: JSON.stringify(items),
+                                            done_count: doneCount,
+                                            updated_at: new Date().toISOString()
+                                        })
+                                        .eq('id', customTodo.id);
+
+                                    let emoji = '💪';
+                                    if (doneCount === totalCount) emoji = '🎉';
+
+                                    let replyText = `✅ 完成「${items[matchedIndex].text}」\n`;
+                                    replyText += `${emoji} 今日進度 ${doneCount}/${totalCount} (${percent}%)`;
+
+                                    if (doneCount === totalCount) {
+                                        replyText += '\n\n🎉 全部完成，辛苦了！';
+                                    } else {
+                                        replyText += `\n\n還剩 ${totalCount - doneCount} 項`;
+                                    }
+
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, replyText);
+                                    }
+                                } else {
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, '找不到對應的待辦項目，可以說清楚一點嗎？');
+                                    }
+                                }
+                            } else {
+                                // 沒有自訂待辦，用原本邏輯
+                                const result = await completeTask(group.employee_id, text);
+                                if (replyToken) {
+                                    await replyMessage(replyToken, result.message);
+                                }
                             }
                         }
                         continue;
