@@ -593,15 +593,20 @@ export async function POST(request: NextRequest) {
                                     ? JSON.parse(customTodo.items)
                                     : customTodo.items;
 
-                                // 找最匹配的未完成項目
+                                // 找最匹配的未完成項目（雙向比對）
                                 let matchedIndex = -1;
                                 let bestScore = 0;
+                                const msgKeywords: string[] = text.replace(/完成|做好了|做完了|搞定/g, '').replace(/[\[\]]/g, '').split(/[\s\/、，,\-–]+/).filter((kw: string) => kw.length > 1);
                                 items.forEach((item: any, idx: number) => {
                                     if (item.done) return;
                                     const keywords: string[] = item.text.replace(/[\[\]]/g, '').split(/[\s\/、，,]+/);
-                                    const score = keywords.filter((kw: string) => kw.length > 1 && text.includes(kw)).length;
-                                    if (score > bestScore) {
-                                        bestScore = score;
+                                    // 待辦關鍵字 → 訊息
+                                    const score1 = keywords.filter((kw: string) => kw.length > 1 && text.includes(kw)).length;
+                                    // 訊息關鍵字 → 待辦
+                                    const score2 = msgKeywords.filter((kw: string) => item.text.includes(kw)).length;
+                                    const totalScore = score1 + score2;
+                                    if (totalScore > bestScore) {
+                                        bestScore = totalScore;
                                         matchedIndex = idx;
                                     }
                                 });
