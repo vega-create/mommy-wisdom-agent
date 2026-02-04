@@ -145,14 +145,143 @@ export async function POST(request: NextRequest) {
                 const text = event.message.text.trim();
                 const textLower = text.toLowerCase();
 
+                // ========================================
+                // ⭐ 私訊處理（員工綁定）
+                // ========================================
+                if (sourceType === 'user' && userId) {
+
+                    // 查詢 User ID
+                    if (textLower === '!groupid' || textLower === '/groupid' || textLower === 'groupid') {
+                        if (replyToken) {
+                            await replyMessage(replyToken, `📋 用戶 ID:\n${userId}`);
+                        }
+                        continue;
+                    }
+
+                    // 綁定流程
+                    if (text === '綁定' || text.startsWith('綁定 ') || text.startsWith('綁定')) {
+                        const inputName = text.replace('綁定', '').trim();
+
+                        // 先查這個 userId 是否已經綁定
+                        const { data: alreadyBound } = await supabase
+                            .from('agent_employees')
+                            .select('id, name')
+                            .eq('line_user_id', userId)
+                            .single();
+
+                        if (alreadyBound) {
+                            if (replyToken) {
+                                await replyMessage(replyToken, `✅ 你已經綁定為「${alreadyBound.name}」囉！`);
+                            }
+                            continue;
+                        }
+
+                        // 情況 A：只輸入「綁定」→ 自動比對 LINE 顯示名稱
+                        if (!inputName) {
+                            let displayName = '';
+                            try {
+                                const profileRes = await fetch(
+                                    `https://api.line.me/v2/bot/profile/${userId}`,
+                                    { headers: { 'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}` } }
+                                );
+                                if (profileRes.ok) {
+                                    const profile = await profileRes.json();
+                                    displayName = profile.displayName || '';
+                                }
+                            } catch (e) {
+                                console.error('取得 LINE 名稱失敗:', e);
+                            }
+
+                            // 找還沒綁定的員工
+                            const { data: unboundEmployees } = await supabase
+                                .from('agent_employees')
+                                .select('id, name, line_user_id')
+                                .is('line_user_id', null)
+                                .eq('is_active', true);
+
+                            if (unboundEmployees && unboundEmployees.length > 0) {
+                                // 嘗試用 LINE 顯示名稱匹配
+                                const matched = unboundEmployees.find((e: { id: string; name: string; line_user_id: string | null }) =>
+                                    displayName.includes(e.name) || e.name.includes(displayName)
+                                );
+
+                                if (matched) {
+                                    await supabase
+                                        .from('agent_employees')
+                                        .update({ line_user_id: userId })
+                                        .eq('id', matched.id);
+
+                                    if (replyToken) {
+                                        await replyMessage(replyToken,
+                                            `✅ 綁定成功！\n你好 ${matched.name} 👋\n\n之後你在客戶群的訊息就不會被當成客戶訊息囉！`
+                                        );
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // 自動匹配失敗 → 提示手動輸入
+                            const unboundList = unboundEmployees
+                                ?.map((e: { id: string; name: string; line_user_id: string | null }, i: number) => `${i + 1}. ${e.name}`)
+                                .join('\n') || '（無未綁定員工）';
+
+                            if (replyToken) {
+                                await replyMessage(replyToken,
+                                    `🔍 找不到匹配的員工\n你的 LINE 名稱：${displayName}\n\n請輸入「綁定 你的名字」\n例如：綁定 雅涵\n\n目前未綁定的員工：\n${unboundList}`
+                                );
+                            }
+                            continue;
+                        }
+
+                        // 情況 B：輸入「綁定 雅涵」→ 用名字精確比對
+                        const { data: employee } = await supabase
+                            .from('agent_employees')
+                            .select('id, name, line_user_id')
+                            .eq('name', inputName)
+                            .eq('is_active', true)
+                            .single();
+
+                        if (!employee) {
+                            if (replyToken) {
+                                await replyMessage(replyToken, `❌ 找不到員工「${inputName}」\n請確認名字跟系統裡的一樣`);
+                            }
+                            continue;
+                        }
+
+                        if (employee.line_user_id && employee.line_user_id !== userId) {
+                            if (replyToken) {
+                                await replyMessage(replyToken, `⚠️ 「${inputName}」已被其他帳號綁定，請聯繫主管`);
+                            }
+                            continue;
+                        }
+
+                        await supabase
+                            .from('agent_employees')
+                            .update({ line_user_id: userId })
+                            .eq('id', employee.id);
+
+                        if (replyToken) {
+                            await replyMessage(replyToken,
+                                `✅ 綁定成功！\n你好 ${employee.name} 👋\n\n之後你在客戶群的訊息就不會被當成客戶訊息囉！`
+                            );
+                        }
+                        continue;
+                    }
+
+                    // 其他私訊不處理（未來可擴充）
+                    continue;
+                }
+
+                // ========================================
+                // 以下是群組訊息處理
+                // ========================================
+
                 // 查詢 Group ID
                 if (textLower === '!groupid' || textLower === '/groupid' || textLower === 'groupid') {
                     if (replyToken) {
                         let reply = '';
                         if (sourceType === 'group' && groupId) {
                             reply = `📋 群組 ID:\n${groupId}`;
-                        } else if (sourceType === 'user' && userId) {
-                            reply = `📋 用戶 ID:\n${userId}`;
                         } else {
                             reply = '無法取得 ID';
                         }
@@ -196,6 +325,21 @@ export async function POST(request: NextRequest) {
                             .eq('is_replied', false);
 
                         continue;
+                    }
+
+                    // ⭐ 排除員工訊息（綁定後生效）
+                    if (userId) {
+                        const { data: isEmployee } = await supabase
+                            .from('agent_employees')
+                            .select('id')
+                            .eq('line_user_id', userId)
+                            .eq('is_active', true)
+                            .single();
+
+                        if (isEmployee) {
+                            console.log(`員工在客戶群 ${groupName} 發言，跳過`);
+                            continue;
+                        }
                     }
 
                     // 過濾機器人訊息（沒有 userId 的是機器人）
