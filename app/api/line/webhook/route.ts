@@ -412,7 +412,7 @@ export async function POST(request: NextRequest) {
 
                     // ⭐ 偵測 #今日待辦（只認第一行是 #今日待辦）
                     const firstLine = text.trim().split('\n')[0].trim();
-                    const isTodoList = firstLine === '#今日待辦';
+                    const isTodoList = firstLine.startsWith('#今日待辦');
 
                     if (isTodoList) {
                         const lines: string[] = text.split('\n').slice(1).filter((l: string) => /^\d+[\.\、\)]/.test(l.trim()));
@@ -593,23 +593,26 @@ export async function POST(request: NextRequest) {
                                     ? JSON.parse(customTodo.items)
                                     : customTodo.items;
 
-                                // 找最匹配的未完成項目（雙向比對）
+                                // 找最匹配的未完成項目（字元重疊比對）
                                 let matchedIndex = -1;
                                 let bestScore = 0;
-                                const msgKeywords: string[] = text.replace(/完成|做好了|做完了|搞定/g, '').replace(/[\[\]]/g, '').split(/[\s\/、，,\-–]+/).filter((kw: string) => kw.length > 1);
+                                const cleanMsg = text.replace(/完成|做好了|做完了|搞定|已|了/g, '').replace(/[\[\]【】]/g, '').trim();
                                 items.forEach((item: any, idx: number) => {
                                     if (item.done) return;
-                                    const keywords: string[] = item.text.replace(/[\[\]]/g, '').split(/[\s\/、，,]+/);
-                                    // 待辦關鍵字 → 訊息
-                                    const score1 = keywords.filter((kw: string) => kw.length > 1 && text.includes(kw)).length;
-                                    // 訊息關鍵字 → 待辦
-                                    const score2 = msgKeywords.filter((kw: string) => item.text.includes(kw)).length;
-                                    const totalScore = score1 + score2;
-                                    if (totalScore > bestScore) {
-                                        bestScore = totalScore;
+                                    const cleanItem = item.text.replace(/[\[\]【】]/g, '');
+                                    // 用 2 字元片段比對（模糊匹配）
+                                    let charScore = 0;
+                                    for (let j = 0; j < cleanMsg.length - 1; j++) {
+                                        const gram = cleanMsg.substring(j, j + 2);
+                                        if (cleanItem.includes(gram)) charScore++;
+                                    }
+                                    if (charScore > bestScore) {
+                                        bestScore = charScore;
                                         matchedIndex = idx;
                                     }
                                 });
+                                // 至少要有 2 個片段匹配才算
+                                if (bestScore < 2) matchedIndex = -1;
 
                                 if (matchedIndex >= 0) {
                                     items[matchedIndex].done = true;
