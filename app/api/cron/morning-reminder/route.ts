@@ -88,6 +88,46 @@ export async function POST() {
                 message += `\n記得先補完昨天的再做今天的💪`;
             }
 
+            // ⭐ 自動建立今日待辦（排程任務 + 昨日未完成）
+            if (todayTasks.length > 0 || carryOverItems.length > 0) {
+                const { data: existingTodo } = await supabase
+                    .from('agent_daily_todos')
+                    .select('id')
+                    .eq('employee_id', emp.id)
+                    .eq('todo_date', todayStr)
+                    .single();
+
+                // 只在員工還沒自己 po 待辦時才自動建立
+                if (!existingTodo) {
+                    const allItems: { index: number; text: string; done: boolean }[] = [];
+                    let idx = 1;
+
+                    // 昨日未完成的排前面
+                    carryOverItems.forEach(item => {
+                        allItems.push({ index: idx++, text: `[昨日] ${item}`, done: false });
+                    });
+
+                    // 今日排程任務
+                    todayTasks.forEach(t => {
+                        const client = t.client_name ? `[${t.client_name}] ` : '';
+                        allItems.push({ index: idx++, text: `${client}${t.task_name}`, done: false });
+                    });
+
+                    await supabase
+                        .from('agent_daily_todos')
+                        .insert({
+                            employee_id: emp.id,
+                            employee_name: emp.name,
+                            group_id: emp.line_group_id,
+                            todo_date: todayStr,
+                            items: JSON.stringify(allItems),
+                            total_count: allItems.length,
+                            done_count: 0,
+                            raw_text: '(系統自動建立)'
+                        });
+                }
+            }
+
             await fetch('https://api.line.me/v2/bot/message/push', {
                 method: 'POST',
                 headers: {
