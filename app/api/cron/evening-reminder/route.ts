@@ -5,11 +5,10 @@ import { supabase } from '@/lib/supabase';
 
 export async function POST() {
     try {
-        const now = new Date();
+        const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
         const dayOfWeek = now.getDay();
-        const todayName = ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek];
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-        const todayStr = now.toISOString().split('T')[0];
+        const todayStr = now.toLocaleDateString('sv-SE');
 
         const { data: employees } = await supabase
             .from('agent_employees')
@@ -21,6 +20,46 @@ export async function POST() {
         for (const emp of employees) {
             if (isWeekend && emp.name !== 'Vega') continue;
             if (!emp.line_group_id) continue;
+
+            // ⭐ 優先查 agent_daily_todos
+            const { data: dailyTodo } = await supabase
+                .from('agent_daily_todos')
+                .select('*')
+                .eq('employee_id', emp.id)
+                .eq('todo_date', todayStr)
+                .single();
+
+            if (dailyTodo) {
+                // 用自訂待辦檢查
+                const items = typeof dailyTodo.items === 'string'
+                    ? JSON.parse(dailyTodo.items)
+                    : dailyTodo.items;
+
+                const unfinished = items.filter((i: any) => !i.done);
+
+                if (unfinished.length === 0) continue; // 全部完成，不提醒
+
+                let message = `⏰ ${emp.name}，今天還有任務未完成：\n\n`;
+                unfinished.forEach((item: any) => {
+                    message += `• ${item.text}\n`;
+                });
+
+                await fetch('https://api.line.me/v2/bot/message/push', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+                    },
+                    body: JSON.stringify({
+                        to: emp.line_group_id,
+                        messages: [{ type: 'text', text: message.trim() }],
+                    }),
+                });
+                continue;
+            }
+
+            // 沒有 daily_todos → 用舊的 agent_tasks 邏輯
+            const todayName = ['日', '一', '二', '三', '四', '五', '六'][dayOfWeek];
 
             const { data: tasks } = await supabase
                 .from('agent_tasks')
@@ -51,7 +90,7 @@ export async function POST() {
 
             let message = `⏰ ${emp.name}，今天還有任務未完成：\n\n`;
             unfinishedTasks.forEach(t => {
-                message += `• ${t.client_name ? t.client_name + ' - ' : ''}${t.task_name}\n`;
+                message += `• ${t.client_name ? t.client_name + ' – ' : ''}${t.task_name}\n`;
             });
 
             await fetch('https://api.line.me/v2/bot/message/push', {
