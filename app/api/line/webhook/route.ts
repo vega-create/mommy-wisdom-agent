@@ -700,11 +700,11 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    const parsed = await parseMessage(text, groupType);
-                    console.log('AI 解析結果:', parsed);
+                    // ⭐ 老闆回報完成（直接偵測關鍵字，不依賴 AI）
+                    const completeTriggers = ['完成', '做好了', '做完了', '搞定'];
+                    const isComplete = completeTriggers.some(w => text.includes(w));
 
-                    // ⭐ 老闆自己回報完成（用 agent_daily_todos）
-                    if (parsed.intent === 'complete_task' && !parsed.employee_name) {
+                    if (isComplete) {
                         // 取得 Vega 的 employee_id
                         const { data: vegaEmp } = await supabase
                             .from('agent_employees')
@@ -790,10 +790,13 @@ export async function POST(request: NextRequest) {
                                 if (replyToken) {
                                     await replyMessage(replyToken, result.message);
                                 }
+                                continue;
                             }
                         }
-                        continue;
                     }
+
+                    const parsed = await parseMessage(text, groupType);
+                    console.log('AI 解析結果:', parsed);
 
                     if (parsed.intent === 'send_message' && parsed.target_group && parsed.message_content) {
                         const result = await sendMessageToGroup(parsed.target_group, parsed.message_content);
