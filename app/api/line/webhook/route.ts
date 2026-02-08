@@ -412,7 +412,7 @@ export async function POST(request: NextRequest) {
 
                     // ⭐ 偵測 #今日待辦（只認第一行是 #今日待辦）
                     const firstLine = text.trim().split('\n')[0].trim();
-                    const isTodoList = firstLine.startsWith('#今日待辦');
+                    const isTodoList = firstLine.startsWith('#今日待辦') || firstLine.startsWith('#今日代辦');
 
                     if (isTodoList) {
                         const lines: string[] = text.split('\n').slice(1).filter((l: string) => /^\d+[\.\、\)]/.test(l.trim()));
@@ -611,8 +611,8 @@ export async function POST(request: NextRequest) {
                                         matchedIndex = idx;
                                     }
                                 });
-                                // 至少要有 2 個片段匹配才算
-                                if (bestScore < 2) matchedIndex = -1;
+                                // 至少要有 1 個片段匹配才算
+                                if (bestScore < 1) matchedIndex = -1;
 
                                 if (matchedIndex >= 0) {
                                     items[matchedIndex].done = true;
@@ -666,6 +666,40 @@ export async function POST(request: NextRequest) {
 
                 // 主管群組
                 if (groupType === 'manager') {
+
+                    // ⭐ 標記群組已回覆（關鍵字：「XXX已回覆」或「XXX已經回覆」）
+                    const replyMatch = text.match(/(.+?)(已經?回覆|已處理)/);
+                    if (replyMatch) {
+                        const targetName = replyMatch[1].trim();
+
+                        // 用群組名稱模糊比對
+                        const { data: groups } = await supabase
+                            .from('agent_groups')
+                            .select('line_group_id, group_name')
+                            .eq('is_active', true);
+
+                        const matched = groups?.find(g =>
+                            g.group_name.includes(targetName) || targetName.includes(g.group_name)
+                        );
+
+                        if (matched) {
+                            await supabase
+                                .from('agent_customer_messages')
+                                .update({ is_replied: true })
+                                .eq('group_id', matched.line_group_id)
+                                .eq('is_replied', false);
+
+                            if (replyToken) {
+                                await replyMessage(replyToken, `✅ 已標記「${matched.group_name}」為已回覆`);
+                            }
+                        } else {
+                            if (replyToken) {
+                                await replyMessage(replyToken, `❌ 找不到「${targetName}」群組`);
+                            }
+                        }
+                        continue;
+                    }
+
                     const parsed = await parseMessage(text, groupType);
                     console.log('AI 解析結果:', parsed);
 
