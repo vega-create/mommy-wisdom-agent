@@ -703,17 +703,93 @@ export async function POST(request: NextRequest) {
                     const parsed = await parseMessage(text, groupType);
                     console.log('AI 解析結果:', parsed);
 
+                    // ⭐ 老闆自己回報完成（用 agent_daily_todos）
                     if (parsed.intent === 'complete_task' && !parsed.employee_name) {
-                        const { data: group } = await supabase
-                            .from('agent_groups')
-                            .select('employee_id')
-                            .eq('line_group_id', groupId)
+                        // 取得 Vega 的 employee_id
+                        const { data: vegaEmp } = await supabase
+                            .from('agent_employees')
+                            .select('id')
+                            .eq('name', 'Vega')
                             .single();
 
-                        if (group?.employee_id) {
-                            const result = await completeTask(group.employee_id, text);
-                            if (replyToken) {
-                                await replyMessage(replyToken, result.message);
+                        if (vegaEmp) {
+                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                            // 先查今天有沒有 daily_todos
+                            const { data: customTodo } = await supabase
+                                .from('agent_daily_todos')
+                                .select('*')
+                                .eq('employee_id', vegaEmp.id)
+                                .eq('todo_date', todayDate)
+                                .single();
+
+                            if (customTodo) {
+                                // 用 daily_todos 比對
+                                const items = typeof customTodo.items === 'string'
+                                    ? JSON.parse(customTodo.items)
+                                    : customTodo.items;
+
+                                // 字元重疊比對
+                                let matchedIndex = -1;
+                                let bestScore = 0;
+                                const cleanMsg = text.replace(/完成|做好了|做完了|搞定|已|了/g, '').replace(/[\[\]【】]/g, '').trim();
+                                items.forEach((item: any, idx: number) => {
+                                    if (item.done) return;
+                                    const cleanItem = item.text.replace(/[\[\]【】]/g, '');
+                                    let charScore = 0;
+                                    for (let j = 0; j < cleanMsg.length - 1; j++) {
+                                        const gram = cleanMsg.substring(j, j + 2);
+                                        if (cleanItem.includes(gram)) charScore++;
+                                    }
+                                    if (charScore > bestScore) {
+                                        bestScore = charScore;
+                                        matchedIndex = idx;
+                                    }
+                                });
+                                if (bestScore < 1) matchedIndex = -1;
+
+                                if (matchedIndex >= 0) {
+                                    items[matchedIndex].done = true;
+                                    const doneCount = items.filter((i: any) => i.done).length;
+                                    const totalCount = items.length;
+                                    const percent = Math.round((doneCount / totalCount) * 100);
+
+                                    await supabase
+                                        .from('agent_daily_todos')
+                                        .update({
+                                            items: JSON.stringify(items),
+                                            done_count: doneCount,
+                                            updated_at: new Date().toISOString()
+                                        })
+                                        .eq('id', customTodo.id);
+
+                                    let emoji = '💪';
+                                    if (doneCount === totalCount) emoji = '🎉';
+
+                                    let replyText = `✅ 完成「${items[matchedIndex].text}」\n`;
+                                    replyText += `${emoji} 今日進度 ${doneCount}/${totalCount} (${percent}%)`;
+
+                                    if (doneCount === totalCount) {
+                                        replyText += '\n\n🎉 全部完成，辛苦了！';
+                                    } else {
+                                        replyText += `\n\n還剩 ${totalCount - doneCount} 項`;
+                                    }
+
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, replyText);
+                                    }
+                                } else {
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, '找不到對應的待辦項目，可以說清楚一點嗎？');
+                                    }
+                                }
+                                continue;
+                            } else {
+                                // 沒有 daily_todos，用舊邏輯
+                                const result = await completeTask(vegaEmp.id, text);
+                                if (replyToken) {
+                                    await replyMessage(replyToken, result.message);
+                                }
                             }
                         }
                         continue;
