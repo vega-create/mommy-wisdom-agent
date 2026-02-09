@@ -327,7 +327,7 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
-                    // ⭐ 排除員工訊息（綁定後生效）
+                    // ⭐ 員工訊息：也標記該群組已回覆（綁定後生效）
                     if (userId) {
                         const { data: isEmployee } = await supabase
                             .from('agent_employees')
@@ -337,7 +337,15 @@ export async function POST(request: NextRequest) {
                             .single();
 
                         if (isEmployee) {
-                            console.log(`員工在客戶群 ${groupName} 發言，跳過`);
+                            console.log(`員工在客戶群 ${groupName} 發言，標記已回覆`);
+
+                            // 把該群組所有舊的未回覆訊息都標記為已回覆
+                            await supabase
+                                .from('agent_customer_messages')
+                                .update({ is_replied: true })
+                                .eq('group_id', groupId)
+                                .eq('is_replied', false);
+
                             continue;
                         }
                     }
