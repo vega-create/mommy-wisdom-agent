@@ -80,6 +80,15 @@ export async function POST() {
                     messages: [{ type: 'text', text: remindText.trim() }],
                 }),
             });
+
+            // ⭐ 提醒後標記這些群組的訊息為已處理，不再重複提醒
+            for (const g of groupsToRemind) {
+                await supabase
+                    .from('agent_customer_messages')
+                    .update({ is_replied: true })
+                    .eq('group_id', g.group_id)
+                    .eq('is_replied', false);
+            }
         }
 
         return NextResponse.json({ success: true, reminded: groupsToRemind.length });
