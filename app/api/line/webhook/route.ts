@@ -365,32 +365,21 @@ export async function POST(request: NextRequest) {
                         is_replied: false
                     });
 
-                    // 老闆 2 小時內有回覆過 → 不通知（正在對話中）
-                    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-                    const { data: recentBossReply } = await supabase
-                        .from('agent_customer_messages')
-                        .select('id')
-                        .eq('group_id', groupId)
-                        .eq('user_id', BOSS_USER_ID)
-                        .gte('created_at', twoHoursAgo)
-                        .limit(1);
+                    // ⭐ 今天是否已經通知過這個群組（一天只通知一次）
+                    const todayStart = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+                    todayStart.setHours(0, 0, 0, 0);
+                    const todayStartISO = todayStart.toISOString();
 
-                    if (recentBossReply && recentBossReply.length > 0) {
-                        continue;
-                    }
-
-                    // 30 分鐘內是否已通知過
-                    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-                    const { data: recentMessages } = await supabase
+                    const { data: todayNotified } = await supabase
                         .from('agent_customer_messages')
                         .select('id')
                         .eq('group_id', groupId)
                         .neq('user_id', BOSS_USER_ID)
-                        .gte('created_at', thirtyMinutesAgo)
+                        .gte('created_at', todayStartISO)
                         .limit(2);
 
-                    // 30 分鐘內第一則訊息才通知
-                    if (!recentMessages || recentMessages.length <= 1) {
+                    // 今天第一則客戶訊息才通知
+                    if (!todayNotified || todayNotified.length <= 1) {
                         const { data: managerGroup } = await supabase
                             .from('agent_groups')
                             .select('line_group_id')
