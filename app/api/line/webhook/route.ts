@@ -546,6 +546,230 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // ⭐ 取消任務（「取消 XXX」）
+                    if (text.startsWith('取消') || text.startsWith('刪除')) {
+                        const taskToCancel = text.replace(/^(取消|刪除)\s*/, '').trim();
+                        if (taskToCancel) {
+                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                            const { data: group } = await supabase
+                                .from('agent_groups')
+                                .select('employee_id')
+                                .eq('line_group_id', groupId)
+                                .single();
+
+                            const { data: customTodo } = await supabase
+                                .from('agent_daily_todos')
+                                .select('*')
+                                .eq('employee_id', group?.employee_id)
+                                .eq('todo_date', todayDate)
+                                .single();
+
+                            if (customTodo) {
+                                const items = typeof customTodo.items === 'string'
+                                    ? JSON.parse(customTodo.items)
+                                    : customTodo.items;
+
+                                // 字元重疊比對找到要取消的項目
+                                let matchedIndex = -1;
+                                let bestScore = 0;
+                                const cleanMsg = taskToCancel.replace(/[\[\]【】]/g, '').trim();
+                                items.forEach((item: any, idx: number) => {
+                                    const cleanItem = item.text.replace(/[\[\]【】]/g, '');
+                                    let charScore = 0;
+                                    for (let j = 0; j < cleanMsg.length - 1; j++) {
+                                        const gram = cleanMsg.substring(j, j + 2);
+                                        if (cleanItem.includes(gram)) charScore++;
+                                    }
+                                    if (charScore > bestScore) {
+                                        bestScore = charScore;
+                                        matchedIndex = idx;
+                                    }
+                                });
+
+                                if (matchedIndex >= 0 && bestScore >= 1) {
+                                    const cancelledItem = items[matchedIndex].text;
+                                    items.splice(matchedIndex, 1);
+
+                                    const totalCount = items.length;
+                                    const doneCount = items.filter((i: any) => i.done).length;
+
+                                    await supabase
+                                        .from('agent_daily_todos')
+                                        .update({
+                                            items: JSON.stringify(items),
+                                            total_count: totalCount,
+                                            done_count: doneCount,
+                                            updated_at: new Date().toISOString()
+                                        })
+                                        .eq('id', customTodo.id);
+
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, `🗑️ 已取消「${cancelledItem}」\n\n還剩 ${totalCount - doneCount} 項待辦`);
+                                    }
+                                } else {
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, '❌ 找不到對應的任務，可以說清楚一點嗎？');
+                                    }
+                                }
+                            } else {
+                                if (replyToken) {
+                                    await replyMessage(replyToken, '📋 今天還沒有待辦清單喔！');
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ⭐ 新增任務（「新增 XXX」或「加一個 XXX」）
+                    if (text.startsWith('新增') || text.startsWith('加一個') || text.startsWith('增加')) {
+                        const newTask = text.replace(/^(新增|加一個|增加)\s*/, '').trim();
+                        if (newTask) {
+                            const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                            const { data: group } = await supabase
+                                .from('agent_groups')
+                                .select('employee_id')
+                                .eq('line_group_id', groupId)
+                                .single();
+
+                            const { data: employee } = await supabase
+                                .from('agent_employees')
+                                .select('name')
+                                .eq('id', group?.employee_id)
+                                .single();
+
+                            const { data: customTodo } = await supabase
+                                .from('agent_daily_todos')
+                                .select('*')
+                                .eq('employee_id', group?.employee_id)
+                                .eq('todo_date', todayDate)
+                                .single();
+
+                            if (customTodo) {
+                                // 有待辦清單，加進去
+                                const items = typeof customTodo.items === 'string'
+                                    ? JSON.parse(customTodo.items)
+                                    : customTodo.items;
+
+                                items.push({ index: items.length + 1, text: newTask, done: false });
+
+                                const totalCount = items.length;
+                                const doneCount = items.filter((i: any) => i.done).length;
+
+                                await supabase
+                                    .from('agent_daily_todos')
+                                    .update({
+                                        items: JSON.stringify(items),
+                                        total_count: totalCount,
+                                        done_count: doneCount,
+                                        updated_at: new Date().toISOString()
+                                    })
+                                    .eq('id', customTodo.id);
+
+                                if (replyToken) {
+                                    await replyMessage(replyToken, `✅ 已新增「${newTask}」\n\n📋 今日待辦 ${totalCount} 項，完成 ${doneCount} 項`);
+                                }
+                            } else {
+                                // 沒有待辦清單，建立新的
+                                const items = [{ index: 1, text: newTask, done: false }];
+
+                                await supabase
+                                    .from('agent_daily_todos')
+                                    .insert({
+                                        employee_id: group?.employee_id,
+                                        employee_name: employee?.name || '',
+                                        group_id: groupId,
+                                        todo_date: todayDate,
+                                        items: JSON.stringify(items),
+                                        total_count: 1,
+                                        done_count: 0,
+                                        raw_text: `#今日待辦\n1. ${newTask}`
+                                    });
+
+                                if (replyToken) {
+                                    await replyMessage(replyToken, `✅ 已新增「${newTask}」\n\n📋 已建立今日待辦清單`);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ⭐ 改期任務（「XXX 改到週三」或「XXX 延到下週」）
+                    const rescheduleMatch = text.match(/(.+?)\s*(改到|延到|移到|改成)\s*(.+)/);
+                    if (rescheduleMatch) {
+                        const taskName = rescheduleMatch[1].trim();
+                        const newDate = rescheduleMatch[3].trim();
+                        const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+
+                        const { data: group } = await supabase
+                            .from('agent_groups')
+                            .select('employee_id')
+                            .eq('line_group_id', groupId)
+                            .single();
+
+                        const { data: customTodo } = await supabase
+                            .from('agent_daily_todos')
+                            .select('*')
+                            .eq('employee_id', group?.employee_id)
+                            .eq('todo_date', todayDate)
+                            .single();
+
+                        if (customTodo) {
+                            const items = typeof customTodo.items === 'string'
+                                ? JSON.parse(customTodo.items)
+                                : customTodo.items;
+
+                            // 字元重疊比對
+                            let matchedIndex = -1;
+                            let bestScore = 0;
+                            const cleanMsg = taskName.replace(/[\[\]【】]/g, '').trim();
+                            items.forEach((item: any, idx: number) => {
+                                const cleanItem = item.text.replace(/[\[\]【】]/g, '');
+                                let charScore = 0;
+                                for (let j = 0; j < cleanMsg.length - 1; j++) {
+                                    const gram = cleanMsg.substring(j, j + 2);
+                                    if (cleanItem.includes(gram)) charScore++;
+                                }
+                                if (charScore > bestScore) {
+                                    bestScore = charScore;
+                                    matchedIndex = idx;
+                                }
+                            });
+
+                            if (matchedIndex >= 0 && bestScore >= 1) {
+                                const rescheduledItem = items[matchedIndex].text;
+                                items.splice(matchedIndex, 1);
+
+                                const totalCount = items.length;
+                                const doneCount = items.filter((i: any) => i.done).length;
+
+                                await supabase
+                                    .from('agent_daily_todos')
+                                    .update({
+                                        items: JSON.stringify(items),
+                                        total_count: totalCount,
+                                        done_count: doneCount,
+                                        updated_at: new Date().toISOString()
+                                    })
+                                    .eq('id', customTodo.id);
+
+                                if (replyToken) {
+                                    await replyMessage(replyToken, `📅 已將「${rescheduledItem}」改到${newDate}\n\n⚠️ 記得到時候加進待辦清單喔！`);
+                                }
+                            } else {
+                                if (replyToken) {
+                                    await replyMessage(replyToken, '❌ 找不到對應的任務，可以說清楚一點嗎？');
+                                }
+                            }
+                        } else {
+                            if (replyToken) {
+                                await replyMessage(replyToken, '📋 今天還沒有待辦清單喔！');
+                            }
+                        }
+                        continue;
+                    }
+
                     // 查詢今日排程任務
                     if (text.includes('今日排程') || text.includes('今天排程') || text.includes('今日任務') || text.includes('今天任務')) {
                         const { data: group } = await supabase
