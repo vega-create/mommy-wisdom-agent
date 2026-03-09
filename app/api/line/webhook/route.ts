@@ -355,6 +355,21 @@ export async function POST(request: NextRequest) {
                         continue;
                     }
 
+                    // ⭐ 先查今天是否已經通知過這個群組（一天只通知一次）
+                    const todayStart = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+                    todayStart.setHours(0, 0, 0, 0);
+                    const todayStartISO = todayStart.toISOString();
+
+                    const { data: todayMessages } = await supabase
+                        .from('agent_customer_messages')
+                        .select('id')
+                        .eq('group_id', groupId)
+                        .neq('user_id', BOSS_USER_ID)
+                        .gte('created_at', todayStartISO)
+                        .limit(1);
+
+                    const shouldNotify = !todayMessages || todayMessages.length === 0;
+
                     // 記錄訊息（前50字）
                     await supabase.from('agent_customer_messages').insert({
                         group_id: groupId,
@@ -365,21 +380,8 @@ export async function POST(request: NextRequest) {
                         is_replied: false
                     });
 
-                    // ⭐ 今天是否已經通知過這個群組（一天只通知一次）
-                    const todayStart = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
-                    todayStart.setHours(0, 0, 0, 0);
-                    const todayStartISO = todayStart.toISOString();
-
-                    const { data: todayNotified } = await supabase
-                        .from('agent_customer_messages')
-                        .select('id')
-                        .eq('group_id', groupId)
-                        .neq('user_id', BOSS_USER_ID)
-                        .gte('created_at', todayStartISO)
-                        .limit(2);
-
                     // 今天第一則客戶訊息才通知
-                    if (!todayNotified || todayNotified.length <= 1) {
+                    if (shouldNotify) {
                         const { data: managerGroup } = await supabase
                             .from('agent_groups')
                             .select('line_group_id')
