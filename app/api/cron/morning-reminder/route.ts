@@ -60,6 +60,22 @@ export async function POST() {
                     .map((i: any) => i.text);
             }
 
+            // 查今天有沒有改期過來的項目
+            const { data: rescheduledTodo } = await supabase
+                .from('agent_daily_todos')
+                .select('*')
+                .eq('employee_id', emp.id)
+                .eq('todo_date', todayStr)
+                .single();
+
+            let rescheduledItems: string[] = [];
+            if (rescheduledTodo && rescheduledTodo.raw_text?.includes('改期自')) {
+                const rItems = typeof rescheduledTodo.items === 'string'
+                    ? JSON.parse(rescheduledTodo.items)
+                    : rescheduledTodo.items;
+                rescheduledItems = rItems.map((i: any) => i.text);
+            }
+
             // 組合訊息
             let message = `☀️ 早安 ${emp.name}！\n\n`;
 
@@ -68,6 +84,15 @@ export async function POST() {
                 message += `⚠️ 昨日未完成（${carryOverItems.length} 項）：\n`;
                 carryOverItems.forEach(item => {
                     message += `🔴 ${item}\n`;
+                });
+                message += `\n`;
+            }
+
+            // 改期項目
+            if (rescheduledItems.length > 0) {
+                message += `📅 改期待辦（${rescheduledItems.length} 項）：\n`;
+                rescheduledItems.forEach(item => {
+                    message += `🔵 ${item}\n`;
                 });
                 message += `\n`;
             }
@@ -82,7 +107,7 @@ export async function POST() {
             }
 
             // 都沒有就不發
-            if (carryOverItems.length === 0 && todayTasks.length === 0) continue;
+            if (carryOverItems.length === 0 && todayTasks.length === 0 && rescheduledItems.length === 0) continue;
 
             if (carryOverItems.length > 0) {
                 message += `\n記得先補完昨天的再做今天的💪`;
@@ -92,22 +117,44 @@ export async function POST() {
             if (todayTasks.length > 0 || carryOverItems.length > 0) {
                 const { data: existingTodo } = await supabase
                     .from('agent_daily_todos')
-                    .select('id')
+                    .select('*')
                     .eq('employee_id', emp.id)
                     .eq('todo_date', todayStr)
                     .single();
 
-                // 只在員工還沒自己 po 待辦時才自動建立
-                if (!existingTodo) {
+                if (existingTodo && existingTodo.raw_text?.includes('改期自')) {
+                    // 已有改期項目，合併排程任務和昨日未完成
+                    const existingItems = typeof existingTodo.items === 'string'
+                        ? JSON.parse(existingTodo.items)
+                        : existingTodo.items;
+                    let idx = existingItems.length > 0
+                        ? Math.max(...existingItems.map((i: any) => i.index)) + 1
+                        : 1;
+
+                    carryOverItems.forEach(item => {
+                        existingItems.push({ index: idx++, text: `[昨日] ${item}`, done: false });
+                    });
+                    todayTasks.forEach(t => {
+                        const client = t.client_name ? `[${t.client_name}] ` : '';
+                        existingItems.push({ index: idx++, text: `${client}${t.task_name}`, done: false });
+                    });
+
+                    await supabase
+                        .from('agent_daily_todos')
+                        .update({
+                            items: JSON.stringify(existingItems),
+                            total_count: existingItems.length,
+                            done_count: existingItems.filter((i: any) => i.done).length,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', existingTodo.id);
+                } else if (!existingTodo) {
                     const allItems: { index: number; text: string; done: boolean }[] = [];
                     let idx = 1;
 
-                    // 昨日未完成的排前面
                     carryOverItems.forEach(item => {
                         allItems.push({ index: idx++, text: `[昨日] ${item}`, done: false });
                     });
-
-                    // 今日排程任務
                     todayTasks.forEach(t => {
                         const client = t.client_name ? `[${t.client_name}] ` : '';
                         allItems.push({ index: idx++, text: `${client}${t.task_name}`, done: false });

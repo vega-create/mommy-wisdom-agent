@@ -700,7 +700,60 @@ export async function POST(request: NextRequest) {
                     if (rescheduleMatch) {
                         const taskName = rescheduleMatch[1].trim();
                         const newDate = rescheduleMatch[3].trim();
-                        const todayDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+                        const nowTw = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+                        const todayDate = nowTw.toLocaleDateString('sv-SE');
+
+                        // 解析中文日期表達為 YYYY-MM-DD
+                        function parseChineseDateExpr(expr: string, base: Date): string | null {
+                            const b = new Date(base);
+                            if (/^明天$|^明日$/.test(expr)) {
+                                b.setDate(b.getDate() + 1);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            if (/^後天$/.test(expr)) {
+                                b.setDate(b.getDate() + 2);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            if (/^大後天$/.test(expr)) {
+                                b.setDate(b.getDate() + 3);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            const dayMap: Record<string, number> = { '日': 0, '天': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6 };
+                            const weekMatch = expr.match(/^(下週|下星期|下禮拜|週|星期|禮拜)([一二三四五六日天])$/);
+                            if (weekMatch) {
+                                const isNext = weekMatch[1].startsWith('下');
+                                const targetDay = dayMap[weekMatch[2]] ?? -1;
+                                if (targetDay < 0) return null;
+                                const currentDay = b.getDay();
+                                let diff = targetDay - currentDay;
+                                if (isNext) {
+                                    diff += 7;
+                                    if (diff > 13) diff -= 7;
+                                } else {
+                                    if (diff <= 0) diff += 7;
+                                }
+                                b.setDate(b.getDate() + diff);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            const dateMatch = expr.match(/^(\d{1,2})[/月](\d{1,2})[日號]?$/);
+                            if (dateMatch) {
+                                const month = parseInt(dateMatch[1]) - 1;
+                                const day = parseInt(dateMatch[2]);
+                                b.setMonth(month, day);
+                                if (b <= base) b.setFullYear(b.getFullYear() + 1);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            const dayNumMatch = expr.match(/^(\d{1,2})[日號]$/);
+                            if (dayNumMatch) {
+                                const day = parseInt(dayNumMatch[1]);
+                                b.setDate(day);
+                                if (b <= base) b.setMonth(b.getMonth() + 1);
+                                return b.toLocaleDateString('sv-SE');
+                            }
+                            return null;
+                        }
+
+                        const targetDate = parseChineseDateExpr(newDate, nowTw);
 
                         const { data: group } = await supabase
                             .from('agent_groups')
@@ -754,8 +807,55 @@ export async function POST(request: NextRequest) {
                                     })
                                     .eq('id', customTodo.id);
 
-                                if (replyToken) {
-                                    await replyMessage(replyToken, `📅 已將「${rescheduledItem}」改到${newDate}\n\n⚠️ 記得到時候加進待辦清單喔！`);
+                                // 將任務加入目標日期的待辦清單
+                                if (targetDate) {
+                                    const { data: targetTodo } = await supabase
+                                        .from('agent_daily_todos')
+                                        .select('*')
+                                        .eq('employee_id', group?.employee_id)
+                                        .eq('todo_date', targetDate)
+                                        .single();
+
+                                    if (targetTodo) {
+                                        const targetItems = typeof targetTodo.items === 'string'
+                                            ? JSON.parse(targetTodo.items)
+                                            : targetTodo.items;
+                                        const nextIndex = targetItems.length > 0
+                                            ? Math.max(...targetItems.map((i: any) => i.index)) + 1
+                                            : 1;
+                                        targetItems.push({ index: nextIndex, text: rescheduledItem, done: false });
+
+                                        await supabase
+                                            .from('agent_daily_todos')
+                                            .update({
+                                                items: JSON.stringify(targetItems),
+                                                total_count: targetItems.length,
+                                                done_count: targetItems.filter((i: any) => i.done).length,
+                                                updated_at: new Date().toISOString()
+                                            })
+                                            .eq('id', targetTodo.id);
+                                    } else {
+                                        await supabase
+                                            .from('agent_daily_todos')
+                                            .insert({
+                                                employee_id: group?.employee_id,
+                                                employee_name: customTodo.employee_name,
+                                                group_id: groupId,
+                                                todo_date: targetDate,
+                                                items: JSON.stringify([{ index: 1, text: rescheduledItem, done: false }]),
+                                                total_count: 1,
+                                                done_count: 0,
+                                                raw_text: `(改期自 ${todayDate})`
+                                            });
+                                    }
+
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, `📅 已將「${rescheduledItem}」改到${newDate}（${targetDate}）\n\n✅ 届時會自動出現在待辦清單中`);
+                                    }
+                                } else {
+                                    if (replyToken) {
+                                        await replyMessage(replyToken, `📅 已將「${rescheduledItem}」從今日移除\n\n⚠️ 無法辨識「${newDate}」的日期，請手動加入該日待辦`);
+                                    }
                                 }
                             } else {
                                 if (replyToken) {
