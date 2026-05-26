@@ -122,8 +122,8 @@ export async function POST() {
                     .eq('todo_date', todayStr)
                     .single();
 
-                if (existingTodo && existingTodo.raw_text?.includes('改期自')) {
-                    // 已有改期項目，合併排程任務和昨日未完成
+                if (existingTodo && existingTodo.raw_text?.includes('改期自') && !existingTodo.raw_text?.includes('已合併')) {
+                    // 已有改期項目且尚未合併過，合併排程任務和昨日未完成
                     const existingItems = typeof existingTodo.items === 'string'
                         ? JSON.parse(existingTodo.items)
                         : existingTodo.items;
@@ -145,6 +145,7 @@ export async function POST() {
                             items: JSON.stringify(existingItems),
                             total_count: existingItems.length,
                             done_count: existingItems.filter((i: any) => i.done).length,
+                            raw_text: existingTodo.raw_text + ' (已合併)',
                             updated_at: new Date().toISOString()
                         })
                         .eq('id', existingTodo.id);

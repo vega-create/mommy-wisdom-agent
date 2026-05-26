@@ -742,14 +742,30 @@ export async function POST(request: NextRequest) {
                                 const month = parseInt(dateMatch[1]) - 1;
                                 const day = parseInt(dateMatch[2]);
                                 b.setMonth(month, day);
+                                // 日期溢位檢查（例如 2/30 會變 3/2）
+                                if (b.getMonth() !== month) {
+                                    return null;
+                                }
                                 if (b <= base) b.setFullYear(b.getFullYear() + 1);
                                 return b.toLocaleDateString('sv-SE');
                             }
                             const dayNumMatch = expr.match(/^(\d{1,2})[日號]$/);
                             if (dayNumMatch) {
                                 const day = parseInt(dayNumMatch[1]);
+                                const origMonth = b.getMonth();
                                 b.setDate(day);
-                                if (b <= base) b.setMonth(b.getMonth() + 1);
+                                // 日期溢位檢查（例如 4 月設 31 號會變 5/1）
+                                if (b.getMonth() !== origMonth) {
+                                    return null; // 無效日期
+                                }
+                                if (b <= base) {
+                                    b.setMonth(b.getMonth() + 1);
+                                    // 再次檢查下個月是否也溢位
+                                    const nextMonth = (origMonth + 1) % 12;
+                                    if (b.getMonth() !== nextMonth) {
+                                        return null;
+                                    }
+                                }
                                 return b.toLocaleDateString('sv-SE');
                             }
                             return null;
